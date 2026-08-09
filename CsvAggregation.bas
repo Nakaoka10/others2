@@ -10,10 +10,14 @@ Private Const SHEET_PASSED As String = "PassedList"
 Private Const HEADER_ROW As Long = 3
 Private Const KEY_SEPARATOR As String = "|||"
 
+Private gCurrentStep As String
+
 Public Sub SetupCsvAggregation()
 
     Dim wsUsers As Worksheet
     Dim wsPassed As Worksheet
+
+    On Error GoTo ErrorHandler
 
     Application.ScreenUpdating = False
 
@@ -34,6 +38,14 @@ Public Sub SetupCsvAggregation()
         "Use the Run CSV Aggregation button on the first row of the " & _
         SHEET_USERS & " sheet.", _
         vbInformation
+
+    Exit Sub
+
+ErrorHandler:
+    Application.ScreenUpdating = True
+    MsgBox "Setup error." & vbCrLf & _
+           "Error number: " & Err.Number & vbCrLf & _
+           "Description: " & Err.Description, vbCritical
 
 End Sub
 
@@ -74,20 +86,41 @@ Public Sub RunCsvAggregation()
     Application.DisplayAlerts = False
     Application.Calculation = xlCalculationManual
 
+    gCurrentStep = "Reading workbook folder"
+
     basePath = ThisWorkbook.Path
-    csvRootPath = basePath & "\" & CSV_ROOT_FOLDER
 
-    If Dir(csvRootPath, vbDirectory) = "" Then
+    If Len(basePath) = 0 Then
+        MsgBox _
+            "This workbook has not been saved yet." & vbCrLf & _
+            "Save the .xlsm file first, then place the csv folder beside it.", _
+            vbExclamation
+        GoTo SafeExit
+    End If
 
+    If InStr(1, basePath, "://", vbTextCompare) > 0 Then
+        MsgBox _
+            "The workbook is opened from a web location:" & vbCrLf & _
+            basePath & vbCrLf & vbCrLf & _
+            "Please save the .xlsm file to a local Windows folder and place the csv folder beside it.", _
+            vbExclamation
+        GoTo SafeExit
+    End If
+
+    csvRootPath = CombinePath(basePath, CSV_ROOT_FOLDER)
+
+    gCurrentStep = "Checking csv folder: " & csvRootPath
+
+    If Not FolderExists(csvRootPath) Then
         MsgBox _
             "CSV folder was not found." & vbCrLf & vbCrLf & _
             "Expected location:" & vbCrLf & _
             csvRootPath, _
             vbExclamation
-
         GoTo SafeExit
-
     End If
+
+    gCurrentStep = "Preparing worksheets"
 
     Set wsUsers = GetOrCreateSheet(SHEET_USERS)
     Set wsPassed = GetOrCreateSheet(SHEET_PASSED)
@@ -106,39 +139,42 @@ Public Sub RunCsvAggregation()
     Set examOrders = CreateObject("Scripting.Dictionary")
     examOrders.CompareMode = vbTextCompare
 
+    gCurrentStep = "Reading date folders"
+
     dateFolders = GetSortedDateFolders(csvRootPath)
 
     If IsEmpty(dateFolders) Then
-
         MsgBox _
             "No valid date folders were found." & vbCrLf & _
             "Example: csv\20260806\WFD-PreReq\", _
             vbExclamation
-
         GoTo SafeExit
-
     End If
 
     For i = LBound(dateFolders) To UBound(dateFolders)
 
         dateFolderName = CStr(dateFolders(i))
 
-        trackFolderPath = _
-            csvRootPath & "\" & _
-            dateFolderName & "\" & _
-            TARGET_TRACK
+        trackFolderPath = CombinePath( _
+            CombinePath(csvRootPath, dateFolderName), _
+            TARGET_TRACK)
 
-        If Dir(trackFolderPath, vbDirectory) <> "" Then
+        gCurrentStep = "Checking track folder: " & trackFolderPath
 
+        If FolderExists(trackFolderPath) Then
+
+            gCurrentStep = "Reading CSV files in: " & trackFolderPath
             csvFiles = GetSortedCsvFiles(trackFolderPath)
 
             If Not IsEmpty(csvFiles) Then
 
                 For j = LBound(csvFiles) To UBound(csvFiles)
 
-                    csvFilePath = _
-                        trackFolderPath & "\" & _
-                        CStr(csvFiles(j))
+                    csvFilePath = CombinePath( _
+                        trackFolderPath, _
+                        CStr(csvFiles(j)))
+
+                    gCurrentStep = "Processing CSV: " & csvFilePath
 
                     If ProcessCsvFile( _
                         csvFilePath, _
@@ -150,11 +186,8 @@ Public Sub RunCsvAggregation()
                         examOrders) Then
 
                         processedFileCount = processedFileCount + 1
-
                     Else
-
                         skippedFileCount = skippedFileCount + 1
-
                     End If
 
                 Next j
@@ -165,14 +198,18 @@ Public Sub RunCsvAggregation()
 
     Next i
 
+    gCurrentStep = "Writing UserList"
     OutputUsers wsUsers, users, userOrder
 
+    gCurrentStep = "Writing PassedList"
     OutputPassedUsers _
         wsPassed, _
         passedUsers, _
         passedOrder, _
         examData, _
         examOrders
+
+    gCurrentStep = "Completed"
 
     MsgBox _
         "CSV aggregation completed." & vbCrLf & vbCrLf & _
@@ -195,6 +232,7 @@ ErrorHandler:
 
     MsgBox _
         "An error occurred." & vbCrLf & vbCrLf & _
+        "Step: " & gCurrentStep & vbCrLf & _
         "Error number: " & Err.Number & vbCrLf & _
         "Description: " & Err.Description, _
         vbCritical
@@ -282,9 +320,7 @@ Private Function ProcessCsvFile( _
         Or colFullName = 0 _
         Or colEnrollmentDate = 0 _
         Or colEnrollmentEndDate = 0 Then
-
         GoTo FileError
-
     End If
 
     For r = 2 To UBound(data, 1)
@@ -413,14 +449,108 @@ NextRow:
 FileError:
 
     On Error Resume Next
-
     If Not wbCsv Is Nothing Then
         wbCsv.Close SaveChanges:=False
     End If
-
     On Error GoTo 0
 
     ProcessCsvFile = False
+
+End Function
+
+Private Function FolderExists(ByVal folderPath As String) As Boolean
+
+    Dim fso As Object
+
+    On Error GoTo Failed
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    FolderExists = fso.FolderExists(folderPath)
+    Exit Function
+
+Failed:
+    FolderExists = False
+
+End Function
+
+Private Function CombinePath( _
+    ByVal parentPath As String, _
+    ByVal childName As String) As String
+
+    If Right$(parentPath, 1) = "\" Then
+        CombinePath = parentPath & childName
+    Else
+        CombinePath = parentPath & "\" & childName
+    End If
+
+End Function
+
+Private Function GetSortedDateFolders( _
+    ByVal rootPath As String) As Variant
+
+    Dim fso As Object
+    Dim rootFolder As Object
+    Dim subFolder As Object
+
+    Dim arr() As String
+    Dim count As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set rootFolder = fso.GetFolder(rootPath)
+
+    For Each subFolder In rootFolder.SubFolders
+
+        If IsDateFolderName(CStr(subFolder.Name)) Then
+            count = count + 1
+            ReDim Preserve arr(1 To count)
+            arr(count) = CStr(subFolder.Name)
+        End If
+
+    Next subFolder
+
+    If count = 0 Then
+        GetSortedDateFolders = Empty
+        Exit Function
+    End If
+
+    SortStringArray arr
+    GetSortedDateFolders = arr
+
+End Function
+
+Private Function GetSortedCsvFiles( _
+    ByVal folderPath As String) As Variant
+
+    Dim fso As Object
+    Dim folderObj As Object
+    Dim fileObj As Object
+
+    Dim arr() As String
+    Dim count As Long
+    Dim ext As String
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    Set folderObj = fso.GetFolder(folderPath)
+
+    For Each fileObj In folderObj.Files
+
+        ext = LCase$(fso.GetExtensionName(CStr(fileObj.Name)))
+
+        If ext = "csv" Then
+            count = count + 1
+            ReDim Preserve arr(1 To count)
+            arr(count) = CStr(fileObj.Name)
+        End If
+
+    Next fileObj
+
+    If count = 0 Then
+        GetSortedCsvFiles = Empty
+        Exit Function
+    End If
+
+    SortStringArray arr
+    GetSortedCsvFiles = arr
 
 End Function
 
@@ -664,76 +794,6 @@ Private Function FindHeaderColumn( _
 
 End Function
 
-Private Function GetSortedDateFolders( _
-    ByVal rootPath As String) As Variant
-
-    Dim folderName As String
-    Dim arr() As String
-    Dim count As Long
-
-    folderName = Dir(rootPath & "\*", vbDirectory)
-
-    Do While Len(folderName) > 0
-
-        If folderName <> "." And folderName <> ".." Then
-
-            If (GetAttr(rootPath & "\" & folderName) And vbDirectory) = vbDirectory Then
-
-                If IsDateFolderName(folderName) Then
-
-                    count = count + 1
-                    ReDim Preserve arr(1 To count)
-                    arr(count) = folderName
-
-                End If
-
-            End If
-
-        End If
-
-        folderName = Dir()
-
-    Loop
-
-    If count = 0 Then
-        GetSortedDateFolders = Empty
-        Exit Function
-    End If
-
-    SortStringArray arr
-    GetSortedDateFolders = arr
-
-End Function
-
-Private Function GetSortedCsvFiles( _
-    ByVal folderPath As String) As Variant
-
-    Dim fileName As String
-    Dim arr() As String
-    Dim count As Long
-
-    fileName = Dir(folderPath & "\*.csv")
-
-    Do While Len(fileName) > 0
-
-        count = count + 1
-        ReDim Preserve arr(1 To count)
-        arr(count) = fileName
-
-        fileName = Dir()
-
-    Loop
-
-    If count = 0 Then
-        GetSortedCsvFiles = Empty
-        Exit Function
-    End If
-
-    SortStringArray arr
-    GetSortedCsvFiles = arr
-
-End Function
-
 Private Sub SortStringArray(ByRef arr As Variant)
 
     Dim i As Long
@@ -897,7 +957,6 @@ Private Sub CreateRunButton(ByVal ws As Worksheet)
                 btnHeight)
 
     With btn
-
         .Name = "btnRunCsvAggregation"
         .Caption = "Run CSV Aggregation"
 
@@ -907,7 +966,6 @@ Private Sub CreateRunButton(ByVal ws As Worksheet)
 
         .Font.Size = 11
         .Font.Bold = True
-
     End With
 
     ws.Rows(1).RowHeight = 25
@@ -932,7 +990,6 @@ Private Sub FormatSheet(ByVal ws As Worksheet)
         .Font.Bold = True
         .HorizontalAlignment = xlCenter
         .VerticalAlignment = xlCenter
-
     End With
 
     If ws.AutoFilterMode Then
@@ -940,21 +997,17 @@ Private Sub FormatSheet(ByVal ws As Worksheet)
     End If
 
     If lastRow >= HEADER_ROW Then
-
         ws.Range( _
             ws.Cells(HEADER_ROW, 1), _
             ws.Cells(lastRow, lastCol)).AutoFilter
-
     End If
 
     ws.Columns.AutoFit
 
     For c = 1 To lastCol
-
         If ws.Columns(c).ColumnWidth > 45 Then
             ws.Columns(c).ColumnWidth = 45
         End If
-
     Next c
 
 End Sub
@@ -1013,17 +1066,11 @@ Private Function CleanText( _
     ByVal value As Variant) As String
 
     If IsError(value) Then
-
         CleanText = ""
-
     ElseIf IsNull(value) Or IsEmpty(value) Then
-
         CleanText = ""
-
     Else
-
         CleanText = Trim$(CStr(value))
-
     End If
 
 End Function
