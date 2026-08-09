@@ -86,23 +86,16 @@ Public Sub RunCsvAggregation()
     Application.DisplayAlerts = False
     Application.Calculation = xlCalculationManual
 
-    gCurrentStep = "Reading workbook folder"
+    gCurrentStep = "Resolving workbook folder"
 
-    basePath = ThisWorkbook.Path
+    basePath = ResolveWorkbookLocalPath(ThisWorkbook.Path)
 
     If Len(basePath) = 0 Then
         MsgBox _
-            "This workbook has not been saved yet." & vbCrLf & _
-            "Save the .xlsm file first, then place the csv folder beside it.", _
-            vbExclamation
-        GoTo SafeExit
-    End If
-
-    If InStr(1, basePath, "://", vbTextCompare) > 0 Then
-        MsgBox _
-            "The workbook is opened from a web location:" & vbCrLf & _
-            basePath & vbCrLf & vbCrLf & _
-            "Please save the .xlsm file to a local Windows folder and place the csv folder beside it.", _
+            "Could not resolve the local OneDrive/SharePoint sync folder." & vbCrLf & vbCrLf & _
+            "Workbook path:" & vbCrLf & _
+            ThisWorkbook.Path & vbCrLf & vbCrLf & _
+            "Make sure this folder is synchronized to this PC.", _
             vbExclamation
         GoTo SafeExit
     End If
@@ -114,7 +107,9 @@ Public Sub RunCsvAggregation()
     If Not FolderExists(csvRootPath) Then
         MsgBox _
             "CSV folder was not found." & vbCrLf & vbCrLf & _
-            "Expected location:" & vbCrLf & _
+            "Resolved local workbook folder:" & vbCrLf & _
+            basePath & vbCrLf & vbCrLf & _
+            "Expected CSV folder:" & vbCrLf & _
             csvRootPath, _
             vbExclamation
         GoTo SafeExit
@@ -213,6 +208,8 @@ Public Sub RunCsvAggregation()
 
     MsgBox _
         "CSV aggregation completed." & vbCrLf & vbCrLf & _
+        "Resolved local folder:" & vbCrLf & _
+        basePath & vbCrLf & vbCrLf & _
         "Processed CSV files: " & processedFileCount & vbCrLf & _
         "Skipped CSV files: " & skippedFileCount & vbCrLf & _
         "Total users: " & users.Count & vbCrLf & _
@@ -240,6 +237,181 @@ ErrorHandler:
     Resume SafeExit
 
 End Sub
+
+Private Function ResolveWorkbookLocalPath(ByVal workbookPath As String) As String
+
+    Dim localPath As String
+    Dim relativePath As String
+    Dim oneDriveRoot As String
+
+    If Len(workbookPath) = 0 Then
+        ResolveWorkbookLocalPath = ""
+        Exit Function
+    End If
+
+    If InStr(1, workbookPath, "://", vbTextCompare) = 0 Then
+        ResolveWorkbookLocalPath = workbookPath
+        Exit Function
+    End If
+
+    relativePath = GetSharePointRelativePath(workbookPath)
+
+    If Len(relativePath) = 0 Then
+        ResolveWorkbookLocalPath = ""
+        Exit Function
+    End If
+
+    oneDriveRoot = GetBestOneDriveRoot()
+
+    If Len(oneDriveRoot) = 0 Then
+        ResolveWorkbookLocalPath = ""
+        Exit Function
+    End If
+
+    localPath = CombinePath(oneDriveRoot, relativePath)
+
+    If FolderExists(localPath) Then
+        ResolveWorkbookLocalPath = localPath
+        Exit Function
+    End If
+
+    localPath = TryAlternativeOneDriveLayouts(oneDriveRoot, relativePath)
+
+    If Len(localPath) > 0 Then
+        ResolveWorkbookLocalPath = localPath
+    Else
+        ResolveWorkbookLocalPath = ""
+    End If
+
+End Function
+
+Private Function GetSharePointRelativePath(ByVal urlPath As String) As String
+
+    Dim p As Long
+    Dim rel As String
+
+    p = InStr(1, urlPath, "/Documents/", vbTextCompare)
+
+    If p = 0 Then
+        GetSharePointRelativePath = ""
+        Exit Function
+    End If
+
+    rel = Mid$(urlPath, p + Len("/Documents/"))
+
+    rel = Replace(rel, "/", "\")
+    rel = UrlDecodeBasic(rel)
+
+    GetSharePointRelativePath = rel
+
+End Function
+
+Private Function GetBestOneDriveRoot() As String
+
+    Dim candidates As Collection
+    Dim c As Variant
+
+    Set candidates = New Collection
+
+    On Error Resume Next
+
+    AddCandidate candidates, Environ$("OneDriveCommercial")
+    AddCandidate candidates, Environ$("OneDrive")
+    AddCandidate candidates, Environ$("OneDriveConsumer")
+
+    AddCandidate candidates, _
+        Environ$("USERPROFILE") & "\OneDrive - Synopsys"
+
+    AddCandidate candidates, _
+        Environ$("USERPROFILE") & "\OneDrive - Synopsys, Inc."
+
+    AddCandidate candidates, _
+        Environ$("USERPROFILE") & "\OneDrive - Synopsys Inc."
+
+    On Error GoTo 0
+
+    For Each c In candidates
+        If FolderExists(CStr(c)) Then
+            GetBestOneDriveRoot = CStr(c)
+            Exit Function
+        End If
+    Next c
+
+    GetBestOneDriveRoot = ""
+
+End Function
+
+Private Sub AddCandidate( _
+    ByRef candidates As Collection, _
+    ByVal candidatePath As String)
+
+    If Len(Trim$(candidatePath)) > 0 Then
+        candidates.Add Trim$(candidatePath)
+    End If
+
+End Sub
+
+Private Function TryAlternativeOneDriveLayouts( _
+    ByVal oneDriveRoot As String, _
+    ByVal relativePath As String) As String
+
+    Dim testPath As String
+    Dim rel As String
+
+    rel = relativePath
+
+    testPath = CombinePath(oneDriveRoot, rel)
+    If FolderExists(testPath) Then
+        TryAlternativeOneDriveLayouts = testPath
+        Exit Function
+    End If
+
+    If LCase$(Left$(rel, Len("Desktop\"))) = LCase$("Desktop\") Then
+
+        testPath = CombinePath( _
+            Environ$("USERPROFILE") & "\Desktop", _
+            Mid$(rel, Len("Desktop\") + 1))
+
+        If FolderExists(testPath) Then
+            TryAlternativeOneDriveLayouts = testPath
+            Exit Function
+        End If
+
+    End If
+
+    testPath = CombinePath( _
+        oneDriveRoot, _
+        "Documents\" & rel)
+
+    If FolderExists(testPath) Then
+        TryAlternativeOneDriveLayouts = testPath
+        Exit Function
+    End If
+
+    TryAlternativeOneDriveLayouts = ""
+
+End Function
+
+Private Function UrlDecodeBasic(ByVal text As String) As String
+
+    Dim s As String
+
+    s = text
+
+    s = Replace(s, "%20", " ")
+    s = Replace(s, "%28", "(")
+    s = Replace(s, "%29", ")")
+    s = Replace(s, "%23", "#")
+    s = Replace(s, "%25", "%")
+    s = Replace(s, "%26", "&")
+    s = Replace(s, "%2B", "+", , , vbTextCompare)
+    s = Replace(s, "%2D", "-", , , vbTextCompare)
+    s = Replace(s, "%2E", ".", , , vbTextCompare)
+    s = Replace(s, "%5F", "_", , , vbTextCompare)
+
+    UrlDecodeBasic = s
+
+End Function
 
 Private Function ProcessCsvFile( _
     ByVal csvFilePath As String, _
