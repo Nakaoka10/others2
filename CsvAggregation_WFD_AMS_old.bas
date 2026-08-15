@@ -3,6 +3,9 @@ Option Explicit
 
 Private Const SHEET_USER_LIST As String = "AMS_UserList"
 Private Const SHEET_PASSED_LIST As String = "AMS_PassedList"
+Private Const SHEET_DEBUG_SKIPPED As String = "AMS_DebugSkipped"
+Private Const SHEET_DEBUG_USERS As String = "AMS_DebugUsers"
+Private Const SHEET_DEBUG_FILES As String = "AMS_DebugFiles"
 Private Const CSV_FOLDER_NAME As String = "csv"
 Private Const TARGET_SUBFOLDER_NAME As String = "WFD-AMS"
 Private Const STATUS_COMPLETED As String = "Completed"
@@ -79,6 +82,138 @@ ErrHandler:
     MsgBox "AMS aggregation failed." & vbCrLf & Err.Description, vbExclamation
 End Sub
 
+Public Sub DebugAMSSkippedCompletedRows()
+    On Error GoTo ErrHandler
+
+    Dim fso As Object
+    Dim workbookFolder As String
+    Dim csvRootPath As String
+    Dim csvRoot As Object
+    Dim dateFolders As Collection
+    Dim targetTitles As Object
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim nextRow As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    workbookFolder = ResolveLocalWorkbookFolder(fso)
+    csvRootPath = fso.BuildPath(workbookFolder, CSV_FOLDER_NAME)
+
+    If Not fso.FolderExists(csvRootPath) Then
+        Err.Raise vbObjectError + 201, , "CSV root folder was not found: " & csvRootPath
+    End If
+
+    Set ws = EnsureSheet(SHEET_DEBUG_SKIPPED)
+    ws.Cells.Clear
+    WriteDebugSkippedHeaders ws
+    nextRow = 4
+
+    Set csvRoot = fso.GetFolder(csvRootPath)
+    Set dateFolders = GetSortedDateFolders(csvRoot)
+    Set targetTitles = BuildTargetTitleDictionary()
+
+    For i = 1 To dateFolders.Count
+        DebugScanDateFolder fso, dateFolders(i), targetTitles, ws, nextRow
+    Next i
+
+    ws.Columns.AutoFit
+
+    MsgBox "AMS skipped-row debug completed." & vbCrLf & _
+           "Rows output: " & CStr(nextRow - 4), vbInformation
+    Exit Sub
+
+ErrHandler:
+    MsgBox "AMS skipped-row debug failed." & vbCrLf & Err.Description, vbExclamation
+End Sub
+
+Public Sub DebugAMSUserListRows()
+    On Error GoTo ErrHandler
+
+    Dim fso As Object
+    Dim workbookFolder As String
+    Dim csvRootPath As String
+    Dim csvRoot As Object
+    Dim dateFolders As Collection
+    Dim seenUsers As Object
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim nextRow As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    workbookFolder = ResolveLocalWorkbookFolder(fso)
+    csvRootPath = fso.BuildPath(workbookFolder, CSV_FOLDER_NAME)
+
+    If Not fso.FolderExists(csvRootPath) Then
+        Err.Raise vbObjectError + 211, , "CSV root folder was not found: " & csvRootPath
+    End If
+
+    Set ws = EnsureSheet(SHEET_DEBUG_USERS)
+    ws.Cells.Clear
+    WriteDebugUserHeaders ws
+    nextRow = 4
+
+    Set seenUsers = CreateTextDictionary()
+    Set csvRoot = fso.GetFolder(csvRootPath)
+    Set dateFolders = GetSortedDateFolders(csvRoot)
+
+    For i = 1 To dateFolders.Count
+        DebugScanUserDateFolder fso, dateFolders(i), seenUsers, ws, nextRow
+    Next i
+
+    ws.Columns.AutoFit
+
+    MsgBox "AMS user-row debug completed." & vbCrLf & _
+           "Rows output: " & CStr(nextRow - 4), vbInformation
+    Exit Sub
+
+ErrHandler:
+    MsgBox "AMS user-row debug failed." & vbCrLf & Err.Description, vbExclamation
+End Sub
+
+Public Sub DebugAMSFileSummary()
+    On Error GoTo ErrHandler
+
+    Dim fso As Object
+    Dim workbookFolder As String
+    Dim csvRootPath As String
+    Dim csvRoot As Object
+    Dim dateFolders As Collection
+    Dim seenUsers As Object
+    Dim ws As Worksheet
+    Dim i As Long
+    Dim nextRow As Long
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    workbookFolder = ResolveLocalWorkbookFolder(fso)
+    csvRootPath = fso.BuildPath(workbookFolder, CSV_FOLDER_NAME)
+
+    If Not fso.FolderExists(csvRootPath) Then
+        Err.Raise vbObjectError + 221, , "CSV root folder was not found: " & csvRootPath
+    End If
+
+    Set ws = EnsureSheet(SHEET_DEBUG_FILES)
+    ws.Cells.Clear
+    WriteDebugFileHeaders ws
+    nextRow = 4
+
+    Set seenUsers = CreateTextDictionary()
+    Set csvRoot = fso.GetFolder(csvRootPath)
+    Set dateFolders = GetSortedDateFolders(csvRoot)
+
+    For i = 1 To dateFolders.Count
+        DebugScanFileSummaryDateFolder fso, dateFolders(i), seenUsers, ws, nextRow
+    Next i
+
+    ws.Columns.AutoFit
+
+    MsgBox "AMS file-summary debug completed." & vbCrLf & _
+           "Files output: " & CStr(nextRow - 4), vbInformation
+    Exit Sub
+
+ErrHandler:
+    MsgBox "AMS file-summary debug failed." & vbCrLf & Err.Description, vbExclamation
+End Sub
+
 Private Sub ProcessDateFolder(ByVal fso As Object, ByVal dateFolder As Object, ByVal allUsers As Object, ByVal passedUsers As Object, ByVal targetTitles As Object)
     Dim targetFolderPath As String
     Dim targetFolder As Object
@@ -94,6 +229,306 @@ Private Sub ProcessDateFolder(ByVal fso As Object, ByVal dateFolder As Object, B
             ProcessCsvFile fso, fileObj.Path, dateFolder.Name, allUsers, passedUsers, targetTitles
         End If
     Next fileObj
+End Sub
+
+Private Sub DebugScanDateFolder(ByVal fso As Object, ByVal dateFolder As Object, ByVal targetTitles As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim targetFolderPath As String
+    Dim targetFolder As Object
+    Dim fileObj As Object
+
+    targetFolderPath = fso.BuildPath(dateFolder.Path, TARGET_SUBFOLDER_NAME)
+    If Not fso.FolderExists(targetFolderPath) Then Exit Sub
+
+    Set targetFolder = fso.GetFolder(targetFolderPath)
+
+    For Each fileObj In targetFolder.Files
+        If LCase$(fso.GetExtensionName(fileObj.Name)) = "csv" Then
+            DebugScanCsvFile fso, fileObj.Path, dateFolder.Name, targetTitles, ws, nextRow
+        End If
+    Next fileObj
+End Sub
+
+Private Sub DebugScanUserDateFolder(ByVal fso As Object, ByVal dateFolder As Object, ByVal seenUsers As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim targetFolderPath As String
+    Dim targetFolder As Object
+    Dim fileObj As Object
+
+    targetFolderPath = fso.BuildPath(dateFolder.Path, TARGET_SUBFOLDER_NAME)
+    If Not fso.FolderExists(targetFolderPath) Then Exit Sub
+
+    Set targetFolder = fso.GetFolder(targetFolderPath)
+
+    For Each fileObj In targetFolder.Files
+        If LCase$(fso.GetExtensionName(fileObj.Name)) = "csv" Then
+            DebugScanUserCsvFile fso, fileObj.Path, dateFolder.Name, seenUsers, ws, nextRow
+        End If
+    Next fileObj
+End Sub
+
+Private Sub DebugScanFileSummaryDateFolder(ByVal fso As Object, ByVal dateFolder As Object, ByVal seenUsers As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim targetFolderPath As String
+    Dim targetFolder As Object
+    Dim fileObj As Object
+
+    targetFolderPath = fso.BuildPath(dateFolder.Path, TARGET_SUBFOLDER_NAME)
+    If Not fso.FolderExists(targetFolderPath) Then Exit Sub
+
+    Set targetFolder = fso.GetFolder(targetFolderPath)
+
+    For Each fileObj In targetFolder.Files
+        If LCase$(fso.GetExtensionName(fileObj.Name)) = "csv" Then
+            DebugScanFileSummaryCsvFile fso, fileObj.Path, dateFolder.Name, seenUsers, ws, nextRow
+        End If
+    Next fileObj
+End Sub
+
+Private Sub DebugScanFileSummaryCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal sourceDate As String, ByVal seenUsers As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim ts As Object
+    Dim lineText As String
+    Dim rowNo As Long
+    Dim headers As Variant
+    Dim headerMap As Object
+    Dim fields As Variant
+    Dim delimiter As String
+    Dim bestHeaders As Variant
+    Dim bestHeaderMap As Object
+    Dim currentHeaderMap As Object
+    Dim bestDelimiter As String
+    Dim bestScore As Long
+    Dim bestRowNo As Long
+    Dim currentScore As Long
+    Dim username As String
+    Dim email As String
+    Dim fullName As String
+    Dim userKey As String
+    Dim dataRows As Long
+    Dim addedRows As Long
+    Dim mergedRows As Long
+    Dim blankKeyRows As Long
+    Dim firstBlankRows As String
+    Dim firstMergedRows As String
+
+    Set ts = fso.OpenTextFile(filePath, 1, False, -2)
+    rowNo = 0
+    bestScore = -1
+
+    Do While Not ts.AtEndOfStream
+        lineText = CleanInputLine(ts.ReadLine)
+        rowNo = rowNo + 1
+
+        If headerMap Is Nothing Then
+            If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+            delimiter = DetectDelimiter(lineText)
+            headers = ParseDelimitedLine(lineText, delimiter)
+            Set currentHeaderMap = BuildHeaderMap(headers)
+            currentScore = CountRequiredHeaders(currentHeaderMap)
+
+            If currentScore > bestScore Then
+                bestHeaders = headers
+                Set bestHeaderMap = currentHeaderMap
+                bestDelimiter = delimiter
+                bestScore = currentScore
+                bestRowNo = rowNo
+            End If
+
+            If currentScore = RequiredHeaderCount() Then
+                Set headerMap = currentHeaderMap
+                GoTo ContinueLoop
+            End If
+
+            If rowNo >= HEADER_SCAN_LIMIT Then
+                ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+            End If
+
+            GoTo ContinueLoop
+        End If
+
+        If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+        dataRows = dataRows + 1
+        fields = ParseDelimitedLine(lineText, delimiter)
+        username = GetField(fields, headerMap, HEADER_USERNAME)
+        email = GetField(fields, headerMap, HEADER_EMAIL)
+        fullName = GetField(fields, headerMap, HEADER_FULL_NAME)
+        userKey = BuildUserKey(username, email, fullName)
+
+        If Len(userKey) = 0 Then
+            blankKeyRows = blankKeyRows + 1
+            AppendRowNumber firstBlankRows, rowNo
+        ElseIf seenUsers.Exists(userKey) Then
+            mergedRows = mergedRows + 1
+            AppendRowNumber firstMergedRows, rowNo
+        Else
+            addedRows = addedRows + 1
+            seenUsers.Add userKey, True
+        End If
+
+ContinueLoop:
+    Loop
+
+    ts.Close
+    WriteDebugFileRow ws, nextRow, sourceDate, filePath, dataRows, addedRows, mergedRows, blankKeyRows, firstMergedRows, firstBlankRows
+    nextRow = nextRow + 1
+End Sub
+
+Private Sub DebugScanUserCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal sourceDate As String, ByVal seenUsers As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim ts As Object
+    Dim lineText As String
+    Dim rowNo As Long
+    Dim headers As Variant
+    Dim headerMap As Object
+    Dim fields As Variant
+    Dim delimiter As String
+    Dim bestHeaders As Variant
+    Dim bestHeaderMap As Object
+    Dim currentHeaderMap As Object
+    Dim bestDelimiter As String
+    Dim bestScore As Long
+    Dim bestRowNo As Long
+    Dim currentScore As Long
+    Dim username As String
+    Dim email As String
+    Dim fullName As String
+    Dim userKey As String
+    Dim actionText As String
+
+    Set ts = fso.OpenTextFile(filePath, 1, False, -2)
+    rowNo = 0
+    bestScore = -1
+
+    Do While Not ts.AtEndOfStream
+        lineText = CleanInputLine(ts.ReadLine)
+        rowNo = rowNo + 1
+
+        If headerMap Is Nothing Then
+            If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+            delimiter = DetectDelimiter(lineText)
+            headers = ParseDelimitedLine(lineText, delimiter)
+            Set currentHeaderMap = BuildHeaderMap(headers)
+            currentScore = CountRequiredHeaders(currentHeaderMap)
+
+            If currentScore > bestScore Then
+                bestHeaders = headers
+                Set bestHeaderMap = currentHeaderMap
+                bestDelimiter = delimiter
+                bestScore = currentScore
+                bestRowNo = rowNo
+            End If
+
+            If currentScore = RequiredHeaderCount() Then
+                Set headerMap = currentHeaderMap
+                GoTo ContinueLoop
+            End If
+
+            If rowNo >= HEADER_SCAN_LIMIT Then
+                ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+            End If
+
+            GoTo ContinueLoop
+        End If
+
+        If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+        fields = ParseDelimitedLine(lineText, delimiter)
+        username = GetField(fields, headerMap, HEADER_USERNAME)
+        email = GetField(fields, headerMap, HEADER_EMAIL)
+        fullName = GetField(fields, headerMap, HEADER_FULL_NAME)
+        userKey = BuildUserKey(username, email, fullName)
+
+        If Len(userKey) = 0 Then
+            actionText = "Skipped: blank user key"
+        ElseIf seenUsers.Exists(userKey) Then
+            actionText = "Merged: duplicate user key"
+        Else
+            actionText = "Added: first user key"
+            seenUsers.Add userKey, True
+        End If
+
+        WriteDebugUserRow ws, nextRow, sourceDate, filePath, rowNo, username, email, fullName, userKey, actionText
+        nextRow = nextRow + 1
+
+ContinueLoop:
+    Loop
+
+    ts.Close
+End Sub
+
+Private Sub DebugScanCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal sourceDate As String, ByVal targetTitles As Object, ByVal ws As Worksheet, ByRef nextRow As Long)
+    Dim ts As Object
+    Dim lineText As String
+    Dim rowNo As Long
+    Dim headers As Variant
+    Dim headerMap As Object
+    Dim fields As Variant
+    Dim delimiter As String
+    Dim bestHeaders As Variant
+    Dim bestHeaderMap As Object
+    Dim currentHeaderMap As Object
+    Dim bestDelimiter As String
+    Dim bestScore As Long
+    Dim bestRowNo As Long
+    Dim currentScore As Long
+    Dim title As String
+    Dim normalizedTitle As String
+    Dim statusText As String
+
+    Set ts = fso.OpenTextFile(filePath, 1, False, -2)
+    rowNo = 0
+    bestScore = -1
+
+    Do While Not ts.AtEndOfStream
+        lineText = CleanInputLine(ts.ReadLine)
+        rowNo = rowNo + 1
+
+        If headerMap Is Nothing Then
+            If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+            delimiter = DetectDelimiter(lineText)
+            headers = ParseDelimitedLine(lineText, delimiter)
+            Set currentHeaderMap = BuildHeaderMap(headers)
+            currentScore = CountRequiredHeaders(currentHeaderMap)
+
+            If currentScore > bestScore Then
+                bestHeaders = headers
+                Set bestHeaderMap = currentHeaderMap
+                bestDelimiter = delimiter
+                bestScore = currentScore
+                bestRowNo = rowNo
+            End If
+
+            If currentScore = RequiredHeaderCount() Then
+                Set headerMap = currentHeaderMap
+                GoTo ContinueLoop
+            End If
+
+            If rowNo >= HEADER_SCAN_LIMIT Then
+                ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+            End If
+
+            GoTo ContinueLoop
+        End If
+
+        If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
+        fields = ParseDelimitedLine(lineText, delimiter)
+        statusText = GetField(fields, headerMap, HEADER_STATUS)
+
+        If StrComp(statusText, STATUS_COMPLETED, vbTextCompare) = 0 Then
+            title = GetField(fields, headerMap, HEADER_COURSE_TITLE)
+            normalizedTitle = NormalizeCourseTitleForDebug(title)
+
+            If Not targetTitles.Exists(title) Then
+                WriteDebugSkippedRow ws, nextRow, sourceDate, filePath, rowNo, fields, headerMap, title, normalizedTitle, targetTitles.Exists(normalizedTitle)
+                nextRow = nextRow + 1
+            End If
+        End If
+
+ContinueLoop:
+    Loop
+
+    ts.Close
 End Sub
 
 Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal sourceDate As String, ByVal allUsers As Object, ByVal passedUsers As Object, ByVal targetTitles As Object)
@@ -273,6 +708,91 @@ Private Sub WriteBaseHeaders(ByVal ws As Worksheet)
     ws.Cells(3, 4).Value = "Source Date"
 End Sub
 
+Private Sub WriteDebugSkippedHeaders(ByVal ws As Worksheet)
+    ws.Cells(3, 1).Value = "No."
+    ws.Cells(3, 2).Value = "Source Date"
+    ws.Cells(3, 3).Value = "File Path"
+    ws.Cells(3, 4).Value = "CSV Row"
+    ws.Cells(3, 5).Value = HEADER_USERNAME
+    ws.Cells(3, 6).Value = HEADER_EMAIL
+    ws.Cells(3, 7).Value = HEADER_FULL_NAME
+    ws.Cells(3, 8).Value = HEADER_STATUS
+    ws.Cells(3, 9).Value = "Raw Course title"
+    ws.Cells(3, 10).Value = "Normalized Course title"
+    ws.Cells(3, 11).Value = "Matches after normalization"
+End Sub
+
+Private Sub WriteDebugUserHeaders(ByVal ws As Worksheet)
+    ws.Cells(3, 1).Value = "No."
+    ws.Cells(3, 2).Value = "Source Date"
+    ws.Cells(3, 3).Value = "File Path"
+    ws.Cells(3, 4).Value = "CSV Row"
+    ws.Cells(3, 5).Value = HEADER_USERNAME
+    ws.Cells(3, 6).Value = HEADER_EMAIL
+    ws.Cells(3, 7).Value = HEADER_FULL_NAME
+    ws.Cells(3, 8).Value = "User Key"
+    ws.Cells(3, 9).Value = "Action"
+End Sub
+
+Private Sub WriteDebugFileHeaders(ByVal ws As Worksheet)
+    ws.Cells(3, 1).Value = "No."
+    ws.Cells(3, 2).Value = "Source Date"
+    ws.Cells(3, 3).Value = "File Path"
+    ws.Cells(3, 4).Value = "Data Rows"
+    ws.Cells(3, 5).Value = "Added Users"
+    ws.Cells(3, 6).Value = "Merged Duplicate Rows"
+    ws.Cells(3, 7).Value = "Blank User Key Rows"
+    ws.Cells(3, 8).Value = "First Merged CSV Rows"
+    ws.Cells(3, 9).Value = "First Blank-Key CSV Rows"
+End Sub
+
+Private Sub WriteDebugFileRow(ByVal ws As Worksheet, ByVal rowNo As Long, ByVal sourceDate As String, ByVal filePath As String, ByVal dataRows As Long, ByVal addedRows As Long, ByVal mergedRows As Long, ByVal blankKeyRows As Long, ByVal firstMergedRows As String, ByVal firstBlankRows As String)
+    ws.Cells(rowNo, 1).Value = rowNo - 3
+    ws.Cells(rowNo, 2).Value = sourceDate
+    ws.Cells(rowNo, 3).Value = filePath
+    ws.Cells(rowNo, 4).Value = dataRows
+    ws.Cells(rowNo, 5).Value = addedRows
+    ws.Cells(rowNo, 6).Value = mergedRows
+    ws.Cells(rowNo, 7).Value = blankKeyRows
+    ws.Cells(rowNo, 8).Value = firstMergedRows
+    ws.Cells(rowNo, 9).Value = firstBlankRows
+End Sub
+
+Private Sub AppendRowNumber(ByRef rowList As String, ByVal rowNo As Long)
+    If Len(rowList) > 0 Then rowList = rowList & ", "
+    rowList = rowList & CStr(rowNo)
+End Sub
+
+Private Sub WriteDebugUserRow(ByVal ws As Worksheet, ByVal rowNo As Long, ByVal sourceDate As String, ByVal filePath As String, ByVal csvRow As Long, ByVal username As String, ByVal email As String, ByVal fullName As String, ByVal userKey As String, ByVal actionText As String)
+    ws.Cells(rowNo, 1).Value = rowNo - 3
+    ws.Cells(rowNo, 2).Value = sourceDate
+    ws.Cells(rowNo, 3).Value = filePath
+    ws.Cells(rowNo, 4).Value = csvRow
+    ws.Cells(rowNo, 5).Value = username
+    ws.Cells(rowNo, 6).Value = email
+    ws.Cells(rowNo, 7).Value = fullName
+    ws.Cells(rowNo, 8).Value = userKey
+    ws.Cells(rowNo, 9).Value = actionText
+End Sub
+
+Private Sub WriteDebugSkippedRow(ByVal ws As Worksheet, ByVal rowNo As Long, ByVal sourceDate As String, ByVal filePath As String, ByVal csvRow As Long, ByVal fields As Variant, ByVal headerMap As Object, ByVal title As String, ByVal normalizedTitle As String, ByVal normalizedMatch As Boolean)
+    ws.Cells(rowNo, 1).Value = rowNo - 3
+    ws.Cells(rowNo, 2).Value = sourceDate
+    ws.Cells(rowNo, 3).Value = filePath
+    ws.Cells(rowNo, 4).Value = csvRow
+    ws.Cells(rowNo, 5).Value = GetField(fields, headerMap, HEADER_USERNAME)
+    ws.Cells(rowNo, 6).Value = GetField(fields, headerMap, HEADER_EMAIL)
+    ws.Cells(rowNo, 7).Value = GetField(fields, headerMap, HEADER_FULL_NAME)
+    ws.Cells(rowNo, 8).Value = GetField(fields, headerMap, HEADER_STATUS)
+    ws.Cells(rowNo, 9).Value = title
+    ws.Cells(rowNo, 10).Value = normalizedTitle
+    If normalizedMatch Then
+        ws.Cells(rowNo, 11).Value = "Yes"
+    Else
+        ws.Cells(rowNo, 11).Value = "No"
+    End If
+End Sub
+
 Private Sub WritePassedGroupHeaders(ByVal ws As Worksheet, ByVal groupCount As Long)
     Dim i As Long
     Dim baseCol As Long
@@ -374,13 +894,36 @@ Private Function BuildTargetTitleDictionary() As Object
     BuildTargetTitleDictionary.Add "PrimeWave Design Environment Exam", True
 End Function
 
+Private Function NormalizeCourseTitleForDebug(ByVal title As String) As String
+    title = Trim$(title)
+    title = Replace(title, ChrWValue(160), " ")
+    title = Replace(title, ChrWValue(12288), " ")
+    title = CollapseSpaces(title)
+
+    If InStr(1, title, "Purple Certification:", vbTextCompare) = 1 Then
+        title = Trim$(Mid$(title, Len("Purple Certification:") + 1))
+        title = CollapseSpaces(title)
+    End If
+
+    NormalizeCourseTitleForDebug = title
+End Function
+
+Private Function CollapseSpaces(ByVal text As String) As String
+    Do While InStr(1, text, "  ", vbBinaryCompare) > 0
+        text = Replace(text, "  ", " ")
+    Loop
+    CollapseSpaces = text
+End Function
+
 Private Function BuildUserKey(ByVal username As String, ByVal email As String, ByVal fullName As String) As String
     username = Trim$(username)
     email = Trim$(email)
     fullName = Trim$(fullName)
 
-    If Len(username) > 0 Or Len(email) > 0 Then
+    If Len(username) > 0 And Len(email) > 0 Then
         BuildUserKey = LCase$(username) & "|" & LCase$(email)
+    ElseIf Len(username) > 0 Or Len(email) > 0 Then
+        BuildUserKey = LCase$(username) & "|" & LCase$(email) & "|" & LCase$(fullName)
     Else
         BuildUserKey = LCase$(fullName)
     End If
