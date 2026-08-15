@@ -173,6 +173,7 @@ Public Sub RunDVAggregation()
 
                     If ProcessCsvFile( _
                         csvFilePath, _
+                        dateFolderName, _
                         users, _
                         userOrder, _
                         passedUsers, _
@@ -415,6 +416,7 @@ End Function
 
 Private Function ProcessCsvFile( _
     ByVal csvFilePath As String, _
+    ByVal sourceDate As String, _
     ByRef users As Object, _
     ByRef userOrder As Collection, _
     ByRef passedUsers As Object, _
@@ -517,7 +519,8 @@ Private Function ProcessCsvFile( _
                 email, _
                 fullName, _
                 enrollmentDate, _
-                enrollmentEndDate)
+                enrollmentEndDate, _
+                sourceDate)
 
             users.Add userKey, userInfo
             userOrder.Add userKey
@@ -531,6 +534,7 @@ Private Function ProcessCsvFile( _
             userInfo(2) = fullName
             userInfo(3) = enrollmentDate
             userInfo(4) = enrollmentEndDate
+            userInfo(5) = sourceDate
 
             users(userKey) = userInfo
 
@@ -747,7 +751,7 @@ Private Sub OutputUsers( _
         Exit Sub
     End If
 
-    ReDim outputData(1 To users.Count, 1 To 6)
+    ReDim outputData(1 To users.Count, 1 To 7)
 
     For i = 1 To userOrder.Count
 
@@ -760,11 +764,12 @@ Private Sub OutputUsers( _
         outputData(i, 4) = info(2)
         outputData(i, 5) = info(3)
         outputData(i, 6) = info(4)
+        outputData(i, 7) = info(5)
 
     Next i
 
     ws.Cells(HEADER_ROW + 1, 1) _
-        .Resize(users.Count, 6).Value = outputData
+        .Resize(users.Count, 7).Value = outputData
 
     ws.Columns(5).NumberFormat = "yyyy/mm/dd"
     ws.Columns(6).NumberFormat = "yyyy/mm/dd"
@@ -1049,6 +1054,7 @@ Private Sub WriteUserHeaders(ByVal ws As Worksheet)
     ws.Cells(HEADER_ROW, 4).Value = "Full Name"
     ws.Cells(HEADER_ROW, 5).Value = "Enrollment Date"
     ws.Cells(HEADER_ROW, 6).Value = "Enrollment End Date"
+    ws.Cells(HEADER_ROW, 7).Value = "Source Date"
 
 End Sub
 
@@ -1279,5 +1285,7 @@ Private Function GetOptionalCellValue( _
     End If
 
 End Function
+
+
 
 
