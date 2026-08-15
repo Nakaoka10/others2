@@ -102,6 +102,7 @@ Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal 
     Dim headers As Variant
     Dim headerMap As Object
     Dim fields As Variant
+    Dim delimiter As String
     Dim userKey As String
     Dim title As String
     Dim statusText As String
@@ -119,7 +120,8 @@ Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal 
         If rowNo < 3 Then
             GoTo ContinueLoop
         ElseIf rowNo = 3 Then
-            headers = ParseCsvLine(lineText)
+            delimiter = DetectDelimiter(lineText)
+            headers = ParseDelimitedLine(lineText, delimiter)
             Set headerMap = BuildHeaderMap(headers)
             ValidateHeaders headerMap, filePath
             GoTo ContinueLoop
@@ -127,7 +129,7 @@ Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal 
 
         If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
 
-        fields = ParseCsvLine(lineText)
+        fields = ParseDelimitedLine(lineText, delimiter)
         userKey = BuildUserKey(GetField(fields, headerMap, HEADER_USERNAME), _
                                GetField(fields, headerMap, HEADER_EMAIL), _
                                GetField(fields, headerMap, HEADER_FULL_NAME))
@@ -450,13 +452,29 @@ Private Function BuildHeaderMap(ByVal headers As Variant) As Object
     Set map = CreateTextDictionary()
 
     For i = LBound(headers) To UBound(headers)
-        headerText = Trim$(CStr(headers(i)))
+        headerText = NormalizeHeaderText(CStr(headers(i)))
         If Len(headerText) > 0 Then
             If Not map.Exists(headerText) Then map.Add headerText, i
         End If
     Next i
 
     Set BuildHeaderMap = map
+End Function
+
+Private Function NormalizeHeaderText(ByVal headerText As String) As String
+    headerText = Trim$(headerText)
+
+    If Len(headerText) > 0 Then
+        If AscW(Left$(headerText, 1)) = -257 Then headerText = Mid$(headerText, 2)
+    End If
+
+    If Len(headerText) >= 2 Then
+        If Left$(headerText, 1) = """" And Right$(headerText, 1) = """" Then
+            headerText = Mid$(headerText, 2, Len(headerText) - 2)
+        End If
+    End If
+
+    NormalizeHeaderText = Trim$(headerText)
 End Function
 
 Private Sub ValidateHeaders(ByVal headerMap As Object, ByVal filePath As String)
@@ -491,6 +509,10 @@ Private Function GetField(ByVal fields As Variant, ByVal headerMap As Object, By
 End Function
 
 Private Function ParseCsvLine(ByVal lineText As String) As Variant
+    ParseCsvLine = ParseDelimitedLine(lineText, DetectDelimiter(lineText))
+End Function
+
+Private Function ParseDelimitedLine(ByVal lineText As String, ByVal delimiter As String) As Variant
     Dim values As Collection
     Dim currentValue As String
     Dim i As Long
@@ -511,7 +533,7 @@ Private Function ParseCsvLine(ByVal lineText As String) As Variant
             Else
                 inQuotes = Not inQuotes
             End If
-        ElseIf ch = "," And Not inQuotes Then
+        ElseIf ch = delimiter And Not inQuotes Then
             values.Add currentValue
             currentValue = vbNullString
         Else
@@ -520,7 +542,45 @@ Private Function ParseCsvLine(ByVal lineText As String) As Variant
     Next i
 
     values.Add currentValue
-    ParseCsvLine = CollectionToArray(values)
+    ParseDelimitedLine = CollectionToArray(values)
+End Function
+
+Private Function DetectDelimiter(ByVal lineText As String) As String
+    Dim commaCount As Long
+    Dim tabCount As Long
+    Dim semicolonCount As Long
+
+    commaCount = CountDelimiterOutsideQuotes(lineText, ",")
+    tabCount = CountDelimiterOutsideQuotes(lineText, vbTab)
+    semicolonCount = CountDelimiterOutsideQuotes(lineText, ";")
+
+    If tabCount > commaCount And tabCount >= semicolonCount Then
+        DetectDelimiter = vbTab
+    ElseIf semicolonCount > commaCount And semicolonCount > tabCount Then
+        DetectDelimiter = ";"
+    Else
+        DetectDelimiter = ","
+    End If
+End Function
+
+Private Function CountDelimiterOutsideQuotes(ByVal lineText As String, ByVal delimiter As String) As Long
+    Dim i As Long
+    Dim ch As String
+    Dim inQuotes As Boolean
+
+    For i = 1 To Len(lineText)
+        ch = Mid$(lineText, i, 1)
+
+        If ch = """" Then
+            If inQuotes And i < Len(lineText) And Mid$(lineText, i + 1, 1) = """" Then
+                i = i + 1
+            Else
+                inQuotes = Not inQuotes
+            End If
+        ElseIf ch = delimiter And Not inQuotes Then
+            CountDelimiterOutsideQuotes = CountDelimiterOutsideQuotes + 1
+        End If
+    Next i
 End Function
 
 Private Function CollectionToArray(ByVal values As Collection) As Variant
