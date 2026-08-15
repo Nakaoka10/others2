@@ -13,6 +13,7 @@ Private Const HEADER_FULL_NAME As String = "Full Name"
 Private Const HEADER_COURSE_TITLE As String = "Course title"
 Private Const HEADER_STATUS As String = "Course Enrollment Status"
 Private Const HEADER_FINAL_SCORE As String = "Final Score"
+Private Const HEADER_SCAN_LIMIT As Long = 50
 
 Public Sub SetupAMSAggregation()
     Dim wsUsers As Worksheet
@@ -108,22 +109,49 @@ Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal 
     Dim statusText As String
     Dim finalScore As String
     Dim rec As Object
+    Dim bestHeaders As Variant
+    Dim bestHeaderMap As Object
+    Dim currentHeaderMap As Object
+    Dim bestDelimiter As String
+    Dim bestScore As Long
+    Dim bestRowNo As Long
+    Dim currentScore As Long
 
-    Set ts = fso.OpenTextFile(filePath, 1, False)
+    Set ts = fso.OpenTextFile(filePath, 1, False, -2)
     rowNo = 0
     Set headerMap = Nothing
+    bestScore = -1
+    bestRowNo = 0
 
     Do While Not ts.AtEndOfStream
-        lineText = ts.ReadLine
+        lineText = CleanInputLine(ts.ReadLine)
         rowNo = rowNo + 1
 
-        If rowNo < 3 Then
-            GoTo ContinueLoop
-        ElseIf rowNo = 3 Then
+        If headerMap Is Nothing Then
+            If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
+
             delimiter = DetectDelimiter(lineText)
             headers = ParseDelimitedLine(lineText, delimiter)
-            Set headerMap = BuildHeaderMap(headers)
-            ValidateHeaders headerMap, filePath
+            Set currentHeaderMap = BuildHeaderMap(headers)
+            currentScore = CountRequiredHeaders(currentHeaderMap)
+
+            If currentScore > bestScore Then
+                bestHeaders = headers
+                Set bestHeaderMap = currentHeaderMap
+                bestDelimiter = delimiter
+                bestScore = currentScore
+                bestRowNo = rowNo
+            End If
+
+            If currentScore = RequiredHeaderCount() Then
+                Set headerMap = currentHeaderMap
+                GoTo ContinueLoop
+            End If
+
+            If rowNo >= HEADER_SCAN_LIMIT Then
+                ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+            End If
+
             GoTo ContinueLoop
         End If
 
@@ -153,6 +181,10 @@ ContinueLoop:
     Loop
 
     ts.Close
+
+    If headerMap Is Nothing Then
+        ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+    End If
 End Sub
 
 Private Sub OutputResults(ByVal allUsers As Object, ByVal passedUsers As Object)
@@ -461,8 +493,15 @@ Private Function BuildHeaderMap(ByVal headers As Variant) As Object
     Set BuildHeaderMap = map
 End Function
 
+Private Function CleanInputLine(ByVal lineText As String) As String
+    CleanInputLine = Replace(lineText, Chr$(0), vbNullString)
+End Function
+
 Private Function NormalizeHeaderText(ByVal headerText As String) As String
     headerText = Trim$(headerText)
+    headerText = Replace(headerText, Chr$(0), vbNullString)
+    headerText = Replace(headerText, Chr$(255) & Chr$(254), vbNullString)
+    headerText = Replace(headerText, Chr$(254) & Chr$(255), vbNullString)
 
     If Len(headerText) > 0 Then
         If AscW(Left$(headerText, 1)) = -257 Then headerText = Mid$(headerText, 2)
@@ -477,8 +516,23 @@ Private Function NormalizeHeaderText(ByVal headerText As String) As String
     NormalizeHeaderText = Trim$(headerText)
 End Function
 
-Private Sub ValidateHeaders(ByVal headerMap As Object, ByVal filePath As String)
+Private Function RequiredHeaderCount() As Long
+    RequiredHeaderCount = 6
+End Function
+
+Private Function CountRequiredHeaders(ByVal headerMap As Object) As Long
+    If headerMap Is Nothing Then Exit Function
+    If headerMap.Exists(HEADER_USERNAME) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_EMAIL) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_FULL_NAME) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_COURSE_TITLE) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_STATUS) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_FINAL_SCORE) Then CountRequiredHeaders = CountRequiredHeaders + 1
+End Function
+
+Private Sub ValidateHeaders(ByVal headerMap As Object, ByVal filePath As String, ByVal headers As Variant, ByVal delimiter As String, ByVal rowNo As Long)
     Dim missing As String
+    Dim detail As String
 
     AddMissingHeader missing, headerMap, HEADER_USERNAME
     AddMissingHeader missing, headerMap, HEADER_EMAIL
@@ -488,12 +542,53 @@ Private Sub ValidateHeaders(ByVal headerMap As Object, ByVal filePath As String)
     AddMissingHeader missing, headerMap, HEADER_FINAL_SCORE
 
     If Len(missing) > 0 Then
-        Err.Raise vbObjectError + 102, , "Required CSV header(s) missing in " & filePath & ": " & Mid$(missing, 3)
+        detail = "Required CSV header(s) missing in " & filePath & ": " & Mid$(missing, 3) & vbCrLf & _
+                 "Best header candidate row: " & CStr(rowNo) & vbCrLf & _
+                 "Detected delimiter: " & DelimiterName(delimiter) & vbCrLf & _
+                 "Detected header fields: " & HeaderArrayPreview(headers)
+        Err.Raise vbObjectError + 102, , detail
     End If
 End Sub
 
+Private Function DelimiterName(ByVal delimiter As String) As String
+    If delimiter = vbTab Then
+        DelimiterName = "tab"
+    ElseIf delimiter = "," Then
+        DelimiterName = "comma"
+    ElseIf delimiter = ";" Then
+        DelimiterName = "semicolon"
+    ElseIf delimiter = "|" Then
+        DelimiterName = "pipe"
+    Else
+        DelimiterName = "unknown"
+    End If
+End Function
+
+Private Function HeaderArrayPreview(ByVal headers As Variant) As String
+    Dim i As Long
+    Dim itemText As String
+
+    On Error GoTo NoHeaders
+
+    For i = LBound(headers) To UBound(headers)
+        itemText = NormalizeHeaderText(CStr(headers(i)))
+        If Len(itemText) > 80 Then itemText = Left$(itemText, 80) & "..."
+        HeaderArrayPreview = HeaderArrayPreview & " [" & CStr(i + 1) & "] " & itemText
+    Next i
+
+    If Len(HeaderArrayPreview) = 0 Then HeaderArrayPreview = "(blank)"
+    Exit Function
+
+NoHeaders:
+    HeaderArrayPreview = "(none)"
+End Function
+
 Private Sub AddMissingHeader(ByRef missing As String, ByVal headerMap As Object, ByVal headerName As String)
-    If Not headerMap.Exists(headerName) Then missing = missing & ", " & headerName
+    If headerMap Is Nothing Then
+        missing = missing & ", " & headerName
+    ElseIf Not headerMap.Exists(headerName) Then
+        missing = missing & ", " & headerName
+    End If
 End Sub
 
 Private Function GetField(ByVal fields As Variant, ByVal headerMap As Object, ByVal headerName As String) As String
@@ -549,15 +644,19 @@ Private Function DetectDelimiter(ByVal lineText As String) As String
     Dim commaCount As Long
     Dim tabCount As Long
     Dim semicolonCount As Long
+    Dim pipeCount As Long
 
     commaCount = CountDelimiterOutsideQuotes(lineText, ",")
     tabCount = CountDelimiterOutsideQuotes(lineText, vbTab)
     semicolonCount = CountDelimiterOutsideQuotes(lineText, ";")
+    pipeCount = CountDelimiterOutsideQuotes(lineText, "|")
 
-    If tabCount > commaCount And tabCount >= semicolonCount Then
+    If tabCount > commaCount And tabCount >= semicolonCount And tabCount >= pipeCount Then
         DetectDelimiter = vbTab
-    ElseIf semicolonCount > commaCount And semicolonCount > tabCount Then
+    ElseIf semicolonCount > commaCount And semicolonCount > tabCount And semicolonCount >= pipeCount Then
         DetectDelimiter = ";"
+    ElseIf pipeCount > commaCount And pipeCount > tabCount And pipeCount > semicolonCount Then
+        DetectDelimiter = "|"
     Else
         DetectDelimiter = ","
     End If
