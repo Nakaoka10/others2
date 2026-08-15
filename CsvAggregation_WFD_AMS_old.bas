@@ -1,1248 +1,931 @@
 Attribute VB_Name = "CsvAggregation_AMS"
 Option Explicit
 
-Private Const CSV_ROOT_FOLDER As String = "csv"
-Private Const TARGET_TRACK As String = "WFD-AMS"
+Private Const SHEET_USER_LIST As String = "AMS_UserList"
+Private Const SHEET_PASSED_LIST As String = "AMS_PassedList"
+Private Const CSV_FOLDER_NAME As String = "csv"
+Private Const TARGET_SUBFOLDER_NAME As String = "WFD-AMS"
+Private Const STATUS_COMPLETED As String = "Completed"
 
-Private Const SHEET_USERS As String = "AMS_UserList"
-Private Const SHEET_PASSED As String = "AMS_PassedList"
-
-Private Const HEADER_ROW As Long = 3
-Private Const KEY_SEPARATOR As String = "|||"
-
-Private gCurrentStep As String
+Private Const HEADER_USERNAME As String = "Username"
+Private Const HEADER_EMAIL As String = "Email"
+Private Const HEADER_FULL_NAME As String = "Full Name"
+Private Const HEADER_COURSE_TITLE As String = "Course title"
+Private Const HEADER_STATUS As String = "Course Enrollment Status"
+Private Const HEADER_FINAL_SCORE As String = "Final Score"
+Private Const HEADER_SCAN_LIMIT As Long = 50
 
 Public Sub SetupAMSAggregation()
-
     Dim wsUsers As Worksheet
     Dim wsPassed As Worksheet
 
-    On Error GoTo ErrorHandler
+    Set wsUsers = EnsureSheet(SHEET_USER_LIST)
+    Set wsPassed = EnsureSheet(SHEET_PASSED_LIST)
 
-    Application.ScreenUpdating = False
+    wsUsers.Cells.Clear
+    wsPassed.Cells.Clear
 
-    Set wsUsers = GetOrCreateSheet(SHEET_USERS)
-    Set wsPassed = GetOrCreateSheet(SHEET_PASSED)
+    WriteBaseHeaders wsUsers
+    WriteBaseHeaders wsPassed
+    WritePassedGroupHeaders wsPassed, 1
 
-    WriteUserHeaders wsUsers
-    WritePassedBaseHeaders wsPassed
-    CreateRunButton wsUsers
+    AddRunButton wsUsers
 
-    FormatSheet wsUsers
-    FormatSheet wsPassed
+    wsUsers.Columns.AutoFit
+    wsPassed.Columns.AutoFit
 
-    Application.ScreenUpdating = True
-
-    MsgBox _
-        "Setup completed." & vbCrLf & vbCrLf & _
-        "Use the Run AMS Aggregation button on the first row of the " & _
-        SHEET_USERS & " sheet.", _
-        vbInformation
-
-    Exit Sub
-
-ErrorHandler:
-    Application.ScreenUpdating = True
-    MsgBox "Setup error." & vbCrLf & _
-           "Error number: " & Err.Number & vbCrLf & _
-           "Description: " & Err.Description, vbCritical
-
+    MsgBox "AMS aggregation sheets were prepared.", vbInformation
 End Sub
 
 Public Sub RunAMSAggregation()
+    On Error GoTo ErrHandler
 
-    Dim basePath As String
+    Dim fso As Object
+    Dim workbookFolder As String
     Dim csvRootPath As String
-
-    Dim wsUsers As Worksheet
-    Dim wsPassed As Worksheet
-
-    Dim users As Object
-    Dim userOrder As Collection
-
+    Dim csvRoot As Object
+    Dim dateFolders As Collection
+    Dim allUsers As Object
     Dim passedUsers As Object
-    Dim passedOrder As Collection
-
-    Dim examData As Object
-    Dim examOrders As Object
-
-    Dim dateFolders As Variant
-    Dim csvFiles As Variant
-
+    Dim targetTitles As Object
     Dim i As Long
-    Dim j As Long
 
-    Dim dateFolderName As String
-    Dim trackFolderPath As String
-    Dim csvFilePath As String
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    workbookFolder = ResolveLocalWorkbookFolder(fso)
+    csvRootPath = fso.BuildPath(workbookFolder, CSV_FOLDER_NAME)
 
-    Dim processedFileCount As Long
-    Dim skippedFileCount As Long
-
-    On Error GoTo ErrorHandler
-
-    Application.ScreenUpdating = False
-    Application.EnableEvents = False
-    Application.DisplayAlerts = False
-    Application.Calculation = xlCalculationManual
-
-    gCurrentStep = "Resolving workbook folder"
-
-    basePath = ResolveWorkbookLocalPath(ThisWorkbook.Path)
-
-    If Len(basePath) = 0 Then
-        MsgBox _
-            "Could not resolve the local OneDrive/SharePoint sync folder." & vbCrLf & vbCrLf & _
-            "Workbook path:" & vbCrLf & _
-            ThisWorkbook.Path & vbCrLf & vbCrLf & _
-            "Make sure this folder is synchronized to this PC.", _
-            vbExclamation
-        GoTo SafeExit
+    If Not fso.FolderExists(csvRootPath) Then
+        Err.Raise vbObjectError + 101, , "CSV root folder was not found: " & csvRootPath
     End If
 
-    csvRootPath = CombinePath(basePath, CSV_ROOT_FOLDER)
+    Set csvRoot = fso.GetFolder(csvRootPath)
+    Set dateFolders = GetSortedDateFolders(csvRoot)
+    Set allUsers = CreateTextDictionary()
+    Set passedUsers = CreateTextDictionary()
+    Set targetTitles = BuildTargetTitleDictionary()
 
-    gCurrentStep = "Checking csv folder: " & csvRootPath
-
-    If Not FolderExists(csvRootPath) Then
-        MsgBox _
-            "CSV folder was not found." & vbCrLf & vbCrLf & _
-            "Resolved local workbook folder:" & vbCrLf & _
-            basePath & vbCrLf & vbCrLf & _
-            "Expected CSV folder:" & vbCrLf & _
-            csvRootPath, _
-            vbExclamation
-        GoTo SafeExit
-    End If
-
-    gCurrentStep = "Preparing worksheets"
-
-    Set wsUsers = GetOrCreateSheet(SHEET_USERS)
-    Set wsPassed = GetOrCreateSheet(SHEET_PASSED)
-
-    Set users = CreateObject("Scripting.Dictionary")
-    users.CompareMode = vbTextCompare
-    Set userOrder = New Collection
-
-    Set passedUsers = CreateObject("Scripting.Dictionary")
-    passedUsers.CompareMode = vbTextCompare
-    Set passedOrder = New Collection
-
-    Set examData = CreateObject("Scripting.Dictionary")
-    examData.CompareMode = vbTextCompare
-
-    Set examOrders = CreateObject("Scripting.Dictionary")
-    examOrders.CompareMode = vbTextCompare
-
-    gCurrentStep = "Reading date folders"
-
-    dateFolders = GetSortedDateFolders(csvRootPath)
-
-    If IsEmpty(dateFolders) Then
-        MsgBox _
-            "No valid date folders were found." & vbCrLf & _
-            "Example: csv\20260806\WFD-AMS\", _
-            vbExclamation
-        GoTo SafeExit
-    End If
-
-    For i = LBound(dateFolders) To UBound(dateFolders)
-
-        dateFolderName = CStr(dateFolders(i))
-
-        trackFolderPath = CombinePath( _
-            CombinePath(csvRootPath, dateFolderName), _
-            TARGET_TRACK)
-
-        gCurrentStep = "Checking track folder: " & trackFolderPath
-
-        If FolderExists(trackFolderPath) Then
-
-            gCurrentStep = "Reading CSV files in: " & trackFolderPath
-            csvFiles = GetSortedCsvFiles(trackFolderPath)
-
-            If Not IsEmpty(csvFiles) Then
-
-                For j = LBound(csvFiles) To UBound(csvFiles)
-
-                    csvFilePath = CombinePath( _
-                        trackFolderPath, _
-                        CStr(csvFiles(j)))
-
-                    gCurrentStep = "Processing CSV: " & csvFilePath
-
-                    If ProcessCsvFile( _
-                        csvFilePath, _
-                        users, _
-                        userOrder, _
-                        passedUsers, _
-                        passedOrder, _
-                        examData, _
-                        examOrders) Then
-
-                        processedFileCount = processedFileCount + 1
-                    Else
-                        skippedFileCount = skippedFileCount + 1
-                    End If
-
-                Next j
-
-            End If
-
-        End If
-
+    For i = 1 To dateFolders.Count
+        ProcessDateFolder fso, dateFolders(i), allUsers, passedUsers, targetTitles
     Next i
 
-    gCurrentStep = "Writing UserList"
-    OutputUsers wsUsers, users, userOrder
+    OutputResults allUsers, passedUsers
 
-    gCurrentStep = "Writing PassedList"
-    OutputPassedUsers _
-        wsPassed, _
-        passedUsers, _
-        passedOrder, _
-        examData, _
-        examOrders
-
-    gCurrentStep = "Completed"
-
-    MsgBox _
-        "CSV aggregation completed." & vbCrLf & vbCrLf & _
-        "Resolved local folder:" & vbCrLf & _
-        basePath & vbCrLf & vbCrLf & _
-        "Processed CSV files: " & processedFileCount & vbCrLf & _
-        "Skipped CSV files: " & skippedFileCount & vbCrLf & _
-        "Total users: " & users.Count & vbCrLf & _
-        "Passed users: " & passedUsers.Count, _
-        vbInformation
-
-SafeExit:
-
-    Application.ScreenUpdating = True
-    Application.EnableEvents = True
-    Application.DisplayAlerts = True
-    Application.Calculation = xlCalculationAutomatic
-
+    MsgBox "AMS aggregation completed." & vbCrLf & _
+           "Resolved local folder: " & workbookFolder & vbCrLf & _
+           "Date folders processed: " & CStr(dateFolders.Count), vbInformation
     Exit Sub
 
-ErrorHandler:
-
-    MsgBox _
-        "An error occurred." & vbCrLf & vbCrLf & _
-        "Step: " & gCurrentStep & vbCrLf & _
-        "Error number: " & Err.Number & vbCrLf & _
-        "Description: " & Err.Description, _
-        vbCritical
-
-    Resume SafeExit
-
+ErrHandler:
+    MsgBox "AMS aggregation failed." & vbCrLf & Err.Description, vbExclamation
 End Sub
 
-Private Function ResolveWorkbookLocalPath(ByVal workbookPath As String) As String
-
-    Dim localPath As String
-    Dim relativePath As String
-    Dim oneDriveRoot As String
-
-    If Len(workbookPath) = 0 Then
-        ResolveWorkbookLocalPath = ""
-        Exit Function
-    End If
-
-    If InStr(1, workbookPath, "://", vbTextCompare) = 0 Then
-        ResolveWorkbookLocalPath = workbookPath
-        Exit Function
-    End If
-
-    relativePath = GetSharePointRelativePath(workbookPath)
-
-    If Len(relativePath) = 0 Then
-        ResolveWorkbookLocalPath = ""
-        Exit Function
-    End If
-
-    oneDriveRoot = GetBestOneDriveRoot()
-
-    If Len(oneDriveRoot) = 0 Then
-        ResolveWorkbookLocalPath = ""
-        Exit Function
-    End If
-
-    localPath = CombinePath(oneDriveRoot, relativePath)
-
-    If FolderExists(localPath) Then
-        ResolveWorkbookLocalPath = localPath
-        Exit Function
-    End If
-
-    localPath = TryAlternativeOneDriveLayouts(oneDriveRoot, relativePath)
-
-    If Len(localPath) > 0 Then
-        ResolveWorkbookLocalPath = localPath
-    Else
-        ResolveWorkbookLocalPath = ""
-    End If
-
-End Function
-
-Private Function GetSharePointRelativePath(ByVal urlPath As String) As String
-
-    Dim p As Long
-    Dim rel As String
-
-    p = InStr(1, urlPath, "/Documents/", vbTextCompare)
-
-    If p = 0 Then
-        GetSharePointRelativePath = ""
-        Exit Function
-    End If
-
-    rel = Mid$(urlPath, p + Len("/Documents/"))
-
-    rel = Replace(rel, "/", "\")
-    rel = UrlDecodeBasic(rel)
-
-    GetSharePointRelativePath = rel
-
-End Function
-
-Private Function GetBestOneDriveRoot() As String
-
-    Dim candidates As Collection
-    Dim c As Variant
-
-    Set candidates = New Collection
-
-    On Error Resume Next
-
-    AddCandidate candidates, Environ$("OneDriveCommercial")
-    AddCandidate candidates, Environ$("OneDrive")
-    AddCandidate candidates, Environ$("OneDriveConsumer")
-
-    AddCandidate candidates, _
-        Environ$("USERPROFILE") & "\OneDrive - Synopsys"
-
-    AddCandidate candidates, _
-        Environ$("USERPROFILE") & "\OneDrive - Synopsys, Inc."
-
-    AddCandidate candidates, _
-        Environ$("USERPROFILE") & "\OneDrive - Synopsys Inc."
-
-    On Error GoTo 0
-
-    For Each c In candidates
-        If FolderExists(CStr(c)) Then
-            GetBestOneDriveRoot = CStr(c)
-            Exit Function
-        End If
-    Next c
-
-    GetBestOneDriveRoot = ""
-
-End Function
-
-Private Sub AddCandidate( _
-    ByRef candidates As Collection, _
-    ByVal candidatePath As String)
-
-    If Len(Trim$(candidatePath)) > 0 Then
-        candidates.Add Trim$(candidatePath)
-    End If
-
-End Sub
-
-Private Function TryAlternativeOneDriveLayouts( _
-    ByVal oneDriveRoot As String, _
-    ByVal relativePath As String) As String
-
-    Dim testPath As String
-    Dim rel As String
-
-    rel = relativePath
-
-    testPath = CombinePath(oneDriveRoot, rel)
-    If FolderExists(testPath) Then
-        TryAlternativeOneDriveLayouts = testPath
-        Exit Function
-    End If
-
-    If LCase$(Left$(rel, Len("Desktop\"))) = LCase$("Desktop\") Then
-
-        testPath = CombinePath( _
-            Environ$("USERPROFILE") & "\Desktop", _
-            Mid$(rel, Len("Desktop\") + 1))
-
-        If FolderExists(testPath) Then
-            TryAlternativeOneDriveLayouts = testPath
-            Exit Function
-        End If
-
-    End If
-
-    testPath = CombinePath( _
-        oneDriveRoot, _
-        "Documents\" & rel)
-
-    If FolderExists(testPath) Then
-        TryAlternativeOneDriveLayouts = testPath
-        Exit Function
-    End If
-
-    TryAlternativeOneDriveLayouts = ""
-
-End Function
-
-Private Function UrlDecodeBasic(ByVal text As String) As String
-
-    Dim s As String
-
-    s = text
-
-    s = Replace(s, "%20", " ")
-    s = Replace(s, "%28", "(")
-    s = Replace(s, "%29", ")")
-    s = Replace(s, "%23", "#")
-    s = Replace(s, "%25", "%")
-    s = Replace(s, "%26", "&")
-    s = Replace(s, "%2B", "+", , , vbTextCompare)
-    s = Replace(s, "%2D", "-", , , vbTextCompare)
-    s = Replace(s, "%2E", ".", , , vbTextCompare)
-    s = Replace(s, "%5F", "_", , , vbTextCompare)
-
-    UrlDecodeBasic = s
-
-End Function
-
-Private Function ProcessCsvFile( _
-    ByVal csvFilePath As String, _
-    ByRef users As Object, _
-    ByRef userOrder As Collection, _
-    ByRef passedUsers As Object, _
-    ByRef passedOrder As Collection, _
-    ByRef examData As Object, _
-    ByRef examOrders As Object) As Boolean
-
-    Dim wbCsv As Workbook
-    Dim wsCsv As Worksheet
-    Dim data As Variant
-
-    Dim lastRow As Long
-    Dim lastCol As Long
-
-    Dim colUsername As Long
-    Dim colEmail As Long
-    Dim colFullName As Long
-    Dim colCourseTitle As Long
-    Dim colEnrollmentDate As Long
-    Dim colEnrollmentEndDate As Long
-    Dim colStatus As Long
-    Dim colFinalScore As Long
-
-    Dim r As Long
-
-    Dim username As String
-    Dim email As String
-    Dim fullName As String
-    Dim courseTitle As String
-    Dim courseStatus As String
-
-    Dim enrollmentDate As Variant
-    Dim enrollmentEndDate As Variant
-    Dim finalScore As Variant
-
-    Dim userKey As String
-    Dim examName As String
-    Dim examKey As String
-
-    Dim userInfo As Variant
-    Dim passInfo As Variant
-    Dim examInfo As Variant
-
-    Dim orderCollection As Collection
-
-    On Error GoTo FileError
-
-    Set wbCsv = Workbooks.Open( _
-                    Filename:=csvFilePath, _
-                    ReadOnly:=True, _
-                    Local:=True)
-
-    Set wsCsv = wbCsv.Worksheets(1)
-
-    lastRow = LastUsedRow(wsCsv)
-    lastCol = LastUsedColumn(wsCsv)
-
-    If lastRow < 2 Or lastCol < 1 Then GoTo FileError
-
-    data = wsCsv.Range( _
-                wsCsv.Cells(1, 1), _
-                wsCsv.Cells(lastRow, lastCol)).Value2
-
-    colUsername = FindHeaderColumn(data, "Username")
-    colEmail = FindHeaderColumn(data, "Email")
-    colFullName = FindHeaderColumn(data, "Full Name")
-    colCourseTitle = FindHeaderColumn(data, "Course title")
-    colEnrollmentDate = FindHeaderColumn(data, "Enrollment Date")
-    colEnrollmentEndDate = FindHeaderColumn(data, "Enrollment End Date")
-    colStatus = FindHeaderColumn(data, "Course Enrollment Status")
-    colFinalScore = FindHeaderColumn(data, "Final Score")
-
-    If colUsername = 0 _
-        Or colEmail = 0 _
-        Or colFullName = 0 _
-        Or colEnrollmentDate = 0 _
-        Or colEnrollmentEndDate = 0 Then
-        GoTo FileError
-    End If
-
-    For r = 2 To UBound(data, 1)
-
-        username = CleanText(data(r, colUsername))
-        email = CleanText(data(r, colEmail))
-        fullName = CleanText(data(r, colFullName))
-
-        enrollmentDate = data(r, colEnrollmentDate)
-        enrollmentEndDate = data(r, colEnrollmentEndDate)
-
-        userKey = MakeUserKey(username, email, fullName)
-
-        If Len(userKey) = 0 Then GoTo NextRow
-
-        If Not users.Exists(userKey) Then
-
-            userInfo = Array( _
-                username, _
-                email, _
-                fullName, _
-                enrollmentDate, _
-                enrollmentEndDate)
-
-            users.Add userKey, userInfo
-            userOrder.Add userKey
-
-        Else
-
-            userInfo = users(userKey)
-
-            userInfo(0) = username
-            userInfo(1) = email
-            userInfo(2) = fullName
-            userInfo(3) = enrollmentDate
-            userInfo(4) = enrollmentEndDate
-
-            users(userKey) = userInfo
-
-        End If
-
-        If colCourseTitle > 0 _
-            And colStatus > 0 _
-            And colFinalScore > 0 Then
-
-            courseTitle = CleanText(data(r, colCourseTitle))
-            courseStatus = CleanText(data(r, colStatus))
-            finalScore = data(r, colFinalScore)
-
-            If StrComp(courseStatus, "Completed", vbTextCompare) = 0 Then
-
-                examName = GetTargetExamName(courseTitle)
-
-                If Len(examName) > 0 Then
-
-                    If Not passedUsers.Exists(userKey) Then
-
-                        passInfo = Array( _
-                            username, _
-                            email, _
-                            fullName, _
-                            enrollmentDate, _
-                            enrollmentEndDate)
-
-                        passedUsers.Add userKey, passInfo
-                        passedOrder.Add userKey
-
-                        Set orderCollection = New Collection
-                        examOrders.Add userKey, orderCollection
-
-                    Else
-
-                        passInfo = passedUsers(userKey)
-
-                        passInfo(0) = username
-                        passInfo(1) = email
-                        passInfo(2) = fullName
-                        passInfo(3) = enrollmentDate
-                        passInfo(4) = enrollmentEndDate
-
-                        passedUsers(userKey) = passInfo
-
-                    End If
-
-                    examKey = _
-                        userKey & KEY_SEPARATOR & _
-                        LCase$(examName)
-
-                    If Not examData.Exists(examKey) Then
-
-                        examInfo = Array( _
-                            courseTitle, _
-                            "Completed", _
-                            finalScore)
-
-                        examData.Add examKey, examInfo
-
-                        Set orderCollection = examOrders(userKey)
-                        orderCollection.Add examName
-
-                    Else
-
-                        examInfo = examData(examKey)
-
-                        examInfo(0) = courseTitle
-                        examInfo(1) = "Completed"
-                        examInfo(2) = finalScore
-
-                        examData(examKey) = examInfo
-
-                    End If
-
-                End If
-
-            End If
-
-        End If
-
-NextRow:
-    Next r
-
-    wbCsv.Close SaveChanges:=False
-    ProcessCsvFile = True
-    Exit Function
-
-FileError:
-
-    On Error Resume Next
-    If Not wbCsv Is Nothing Then
-        wbCsv.Close SaveChanges:=False
-    End If
-    On Error GoTo 0
-
-    ProcessCsvFile = False
-
-End Function
-
-Private Function FolderExists(ByVal folderPath As String) As Boolean
-
-    Dim fso As Object
-
-    On Error GoTo Failed
-
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    FolderExists = fso.FolderExists(folderPath)
-    Exit Function
-
-Failed:
-    FolderExists = False
-
-End Function
-
-Private Function CombinePath( _
-    ByVal parentPath As String, _
-    ByVal childName As String) As String
-
-    If Right$(parentPath, 1) = "\" Then
-        CombinePath = parentPath & childName
-    Else
-        CombinePath = parentPath & "\" & childName
-    End If
-
-End Function
-
-Private Function GetSortedDateFolders( _
-    ByVal rootPath As String) As Variant
-
-    Dim fso As Object
-    Dim rootFolder As Object
-    Dim subFolder As Object
-
-    Dim arr() As String
-    Dim count As Long
-
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Set rootFolder = fso.GetFolder(rootPath)
-
-    For Each subFolder In rootFolder.SubFolders
-
-        If IsDateFolderName(CStr(subFolder.Name)) Then
-            count = count + 1
-            ReDim Preserve arr(1 To count)
-            arr(count) = CStr(subFolder.Name)
-        End If
-
-    Next subFolder
-
-    If count = 0 Then
-        GetSortedDateFolders = Empty
-        Exit Function
-    End If
-
-    SortStringArray arr
-    GetSortedDateFolders = arr
-
-End Function
-
-Private Function GetSortedCsvFiles( _
-    ByVal folderPath As String) As Variant
-
-    Dim fso As Object
-    Dim folderObj As Object
+Private Sub ProcessDateFolder(ByVal fso As Object, ByVal dateFolder As Object, ByVal allUsers As Object, ByVal passedUsers As Object, ByVal targetTitles As Object)
+    Dim targetFolderPath As String
+    Dim targetFolder As Object
     Dim fileObj As Object
 
-    Dim arr() As String
-    Dim count As Long
-    Dim ext As String
+    targetFolderPath = fso.BuildPath(dateFolder.Path, TARGET_SUBFOLDER_NAME)
+    If Not fso.FolderExists(targetFolderPath) Then Exit Sub
 
-    Set fso = CreateObject("Scripting.FileSystemObject")
-    Set folderObj = fso.GetFolder(folderPath)
+    Set targetFolder = fso.GetFolder(targetFolderPath)
 
-    For Each fileObj In folderObj.Files
-
-        ext = LCase$(fso.GetExtensionName(CStr(fileObj.Name)))
-
-        If ext = "csv" Then
-            count = count + 1
-            ReDim Preserve arr(1 To count)
-            arr(count) = CStr(fileObj.Name)
+    For Each fileObj In targetFolder.Files
+        If LCase$(fso.GetExtensionName(fileObj.Name)) = "csv" Then
+            ProcessCsvFile fso, fileObj.Path, dateFolder.Name, allUsers, passedUsers, targetTitles
         End If
-
     Next fileObj
-
-    If count = 0 Then
-        GetSortedCsvFiles = Empty
-        Exit Function
-    End If
-
-    SortStringArray arr
-    GetSortedCsvFiles = arr
-
-End Function
-
-Private Sub OutputUsers( _
-    ByVal ws As Worksheet, _
-    ByVal users As Object, _
-    ByVal userOrder As Collection)
-
-    Dim outputData() As Variant
-    Dim i As Long
-    Dim key As String
-    Dim info As Variant
-
-    ClearOutputArea ws
-    WriteUserHeaders ws
-    CreateRunButton ws
-
-    If users.Count = 0 Then
-        FormatSheet ws
-        Exit Sub
-    End If
-
-    ReDim outputData(1 To users.Count, 1 To 6)
-
-    For i = 1 To userOrder.Count
-
-        key = CStr(userOrder(i))
-        info = users(key)
-
-        outputData(i, 1) = i
-        outputData(i, 2) = info(0)
-        outputData(i, 3) = info(1)
-        outputData(i, 4) = info(2)
-        outputData(i, 5) = info(3)
-        outputData(i, 6) = info(4)
-
-    Next i
-
-    ws.Cells(HEADER_ROW + 1, 1) _
-        .Resize(users.Count, 6).Value = outputData
-
-    ws.Columns(5).NumberFormat = "yyyy/mm/dd"
-    ws.Columns(6).NumberFormat = "yyyy/mm/dd"
-
-    FormatSheet ws
-
 End Sub
 
-Private Sub OutputPassedUsers( _
-    ByVal ws As Worksheet, _
-    ByVal passedUsers As Object, _
-    ByVal passedOrder As Collection, _
-    ByVal examData As Object, _
-    ByVal examOrders As Object)
-
-    Dim i As Long
-    Dim j As Long
-
-    Dim key As String
-    Dim examKey As String
-    Dim examName As String
-
-    Dim info As Variant
-    Dim examInfo As Variant
-
-    Dim orderCollection As Collection
-
-    Dim maxExamCount As Long
-    Dim totalColumns As Long
-    Dim outputData() As Variant
-    Dim c As Long
-
-    ClearOutputArea ws
-
-    maxExamCount = 0
-
-    For i = 1 To passedOrder.Count
-
-        key = CStr(passedOrder(i))
-        Set orderCollection = examOrders(key)
-
-        If orderCollection.Count > maxExamCount Then
-            maxExamCount = orderCollection.Count
-        End If
-
-    Next i
-
-    WritePassedHeaders ws, maxExamCount
-
-    If passedUsers.Count = 0 Then
-        FormatSheet ws
-        Exit Sub
-    End If
-
-    totalColumns = 6 + (maxExamCount * 3)
-
-    ReDim outputData( _
-        1 To passedUsers.Count, _
-        1 To totalColumns)
-
-    For i = 1 To passedOrder.Count
-
-        key = CStr(passedOrder(i))
-        info = passedUsers(key)
-
-        outputData(i, 1) = i
-        outputData(i, 2) = info(0)
-        outputData(i, 3) = info(1)
-        outputData(i, 4) = info(2)
-        outputData(i, 5) = info(3)
-        outputData(i, 6) = info(4)
-
-        Set orderCollection = examOrders(key)
-
-        c = 7
-
-        For j = 1 To orderCollection.Count
-
-            examName = CStr(orderCollection(j))
-
-            examKey = _
-                key & KEY_SEPARATOR & _
-                LCase$(examName)
-
-            examInfo = examData(examKey)
-
-            outputData(i, c) = examInfo(0)
-            outputData(i, c + 1) = examInfo(1)
-            outputData(i, c + 2) = examInfo(2)
-
-            c = c + 3
-
-        Next j
-
-    Next i
-
-    ws.Cells(HEADER_ROW + 1, 1) _
-        .Resize(passedUsers.Count, totalColumns).Value = outputData
-
-    ws.Columns(5).NumberFormat = "yyyy/mm/dd"
-    ws.Columns(6).NumberFormat = "yyyy/mm/dd"
-
-    FormatSheet ws
-
-End Sub
-
-Private Function GetTargetExamName( _
-    ByVal courseTitle As String) As String
-
+Private Sub ProcessCsvFile(ByVal fso As Object, ByVal filePath As String, ByVal sourceDate As String, ByVal allUsers As Object, ByVal passedUsers As Object, ByVal targetTitles As Object)
+    Dim ts As Object
+    Dim lineText As String
+    Dim rowNo As Long
+    Dim headers As Variant
+    Dim headerMap As Object
+    Dim fields As Variant
+    Dim delimiter As String
+    Dim userKey As String
     Dim title As String
+    Dim statusText As String
+    Dim finalScore As String
+    Dim rec As Object
+    Dim bestHeaders As Variant
+    Dim bestHeaderMap As Object
+    Dim currentHeaderMap As Object
+    Dim bestDelimiter As String
+    Dim bestScore As Long
+    Dim bestRowNo As Long
+    Dim currentScore As Long
 
-    title = Trim$(courseTitle)
+    Set ts = fso.OpenTextFile(filePath, 1, False, -2)
+    rowNo = 0
+    Set headerMap = Nothing
+    bestScore = -1
+    bestRowNo = 0
 
-    If InStr(1, title, _
-        "Purple Certification:", _
-        vbTextCompare) = 1 Then
+    Do While Not ts.AtEndOfStream
+        lineText = CleanInputLine(ts.ReadLine)
+        rowNo = rowNo + 1
 
-        title = Trim$(Mid$( _
-            title, _
-            Len("Purple Certification:") + 1))
+        If headerMap Is Nothing Then
+            If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
 
-    End If
+            delimiter = DetectDelimiter(lineText)
+            headers = ParseDelimitedLine(lineText, delimiter)
+            Set currentHeaderMap = BuildHeaderMap(headers)
+            currentScore = CountRequiredHeaders(currentHeaderMap)
 
-    Select Case LCase$(title)
-
-        Case LCase$("Custom Compiler: Basic Layout Design Exam")
-            GetTargetExamName = _
-                "Custom Compiler: Basic Layout Design Exam"
-
-        Case LCase$("Custom Compiler: Introduction to Platform Exam")
-            GetTargetExamName = _
-                "Custom Compiler: Introduction to Platform Exam"
-
-        Case LCase$("Custom Compiler: Schematic Entry Exam")
-            GetTargetExamName = _
-                "Custom Compiler: Schematic Entry Exam"
-
-        Case LCase$("PrimeWave Design Environment Exam")
-            GetTargetExamName = "PrimeWave Design Environment Exam"
-
-        Case Else
-            GetTargetExamName = ""
-
-    End Select
-
-End Function
-
-Private Function MakeUserKey( _
-    ByVal username As String, _
-    ByVal email As String, _
-    ByVal fullName As String) As String
-
-    If Len(username) > 0 Or Len(email) > 0 Then
-
-        MakeUserKey = _
-            LCase$(Trim$(username)) & _
-            KEY_SEPARATOR & _
-            LCase$(Trim$(email))
-
-    ElseIf Len(fullName) > 0 Then
-
-        MakeUserKey = _
-            "FULLNAME" & _
-            KEY_SEPARATOR & _
-            LCase$(Trim$(fullName))
-
-    Else
-
-        MakeUserKey = ""
-
-    End If
-
-End Function
-
-Private Function FindHeaderColumn( _
-    ByVal data As Variant, _
-    ByVal headerName As String) As Long
-
-    Dim c As Long
-    Dim text As String
-
-    For c = 1 To UBound(data, 2)
-
-        text = CleanText(data(1, c))
-        text = Replace(text, ChrW(&HFEFF), "")
-
-        If StrComp( _
-            Trim$(text), _
-            headerName, _
-            vbTextCompare) = 0 Then
-
-            FindHeaderColumn = c
-            Exit Function
-
-        End If
-
-    Next c
-
-    FindHeaderColumn = 0
-
-End Function
-
-Private Sub SortStringArray(ByRef arr As Variant)
-
-    Dim i As Long
-    Dim j As Long
-    Dim temp As String
-
-    For i = LBound(arr) To UBound(arr) - 1
-
-        For j = i + 1 To UBound(arr)
-
-            If StrComp( _
-                CStr(arr(i)), _
-                CStr(arr(j)), _
-                vbTextCompare) > 0 Then
-
-                temp = arr(i)
-                arr(i) = arr(j)
-                arr(j) = temp
-
+            If currentScore > bestScore Then
+                bestHeaders = headers
+                Set bestHeaderMap = currentHeaderMap
+                bestDelimiter = delimiter
+                bestScore = currentScore
+                bestRowNo = rowNo
             End If
 
-        Next j
+            If currentScore = RequiredHeaderCount() Then
+                Set headerMap = currentHeaderMap
+                GoTo ContinueLoop
+            End If
 
-    Next i
+            If rowNo >= HEADER_SCAN_LIMIT Then
+                ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
+            End If
 
-End Sub
+            GoTo ContinueLoop
+        End If
 
-Private Function IsDateFolderName( _
-    ByVal folderName As String) As Boolean
+        If Len(Trim$(lineText)) = 0 Then GoTo ContinueLoop
 
-    Dim yyyy As Long
-    Dim mm As Long
-    Dim dd As Long
+        fields = ParseDelimitedLine(lineText, delimiter)
+        userKey = BuildUserKey(GetField(fields, headerMap, HEADER_USERNAME), _
+                               GetField(fields, headerMap, HEADER_EMAIL), _
+                               GetField(fields, headerMap, HEADER_FULL_NAME))
 
-    On Error GoTo InvalidDate
+        If Len(userKey) = 0 Then GoTo ContinueLoop
 
-    If Len(folderName) <> 8 Then Exit Function
-    If Not IsNumeric(folderName) Then Exit Function
+        Set rec = GetOrCreateUser(allUsers, userKey)
+        UpdateBasicInfo rec, fields, headerMap, sourceDate
 
-    yyyy = CLng(Left$(folderName, 4))
-    mm = CLng(Mid$(folderName, 5, 2))
-    dd = CLng(Right$(folderName, 2))
+        title = GetField(fields, headerMap, HEADER_COURSE_TITLE)
+        statusText = GetField(fields, headerMap, HEADER_STATUS)
+        finalScore = GetField(fields, headerMap, HEADER_FINAL_SCORE)
 
-    If Format$(DateSerial(yyyy, mm, dd), "yyyymmdd") <> folderName Then
-        Exit Function
+        If targetTitles.Exists(title) And StrComp(statusText, STATUS_COMPLETED, vbTextCompare) = 0 Then
+            Set rec = GetOrCreateUser(passedUsers, userKey)
+            UpdateBasicInfo rec, fields, headerMap, sourceDate
+            UpdateExam rec, title, statusText, finalScore, sourceDate
+        End If
+
+ContinueLoop:
+    Loop
+
+    ts.Close
+
+    If headerMap Is Nothing Then
+        ValidateHeaders bestHeaderMap, filePath, bestHeaders, bestDelimiter, bestRowNo
     End If
-
-    IsDateFolderName = True
-    Exit Function
-
-InvalidDate:
-    IsDateFolderName = False
-
-End Function
-
-Private Sub WriteUserHeaders(ByVal ws As Worksheet)
-
-    ws.Cells(HEADER_ROW, 1).Value = "No."
-    ws.Cells(HEADER_ROW, 2).Value = "Username"
-    ws.Cells(HEADER_ROW, 3).Value = "Email"
-    ws.Cells(HEADER_ROW, 4).Value = "Full Name"
-    ws.Cells(HEADER_ROW, 5).Value = "Enrollment Date"
-    ws.Cells(HEADER_ROW, 6).Value = "Enrollment End Date"
-
 End Sub
 
-Private Sub WritePassedBaseHeaders(ByVal ws As Worksheet)
-    WritePassedHeaders ws, 0
+Private Sub OutputResults(ByVal allUsers As Object, ByVal passedUsers As Object)
+    Dim wsUsers As Worksheet
+    Dim wsPassed As Worksheet
+    Dim maxExamCount As Long
+
+    Set wsUsers = EnsureSheet(SHEET_USER_LIST)
+    Set wsPassed = EnsureSheet(SHEET_PASSED_LIST)
+
+    ClearOutputArea wsUsers
+    ClearOutputArea wsPassed
+
+    WriteBaseHeaders wsUsers
+    WriteBaseHeaders wsPassed
+
+    maxExamCount = GetMaxExamCount(passedUsers)
+    If maxExamCount < 1 Then maxExamCount = 1
+    WritePassedGroupHeaders wsPassed, maxExamCount
+
+    WriteUserRows wsUsers, allUsers, False
+    WriteUserRows wsPassed, passedUsers, True
+
+    AddRunButton wsUsers
+
+    wsUsers.Columns.AutoFit
+    wsPassed.Columns.AutoFit
 End Sub
 
-Private Sub WritePassedHeaders( _
-    ByVal ws As Worksheet, _
-    ByVal examCount As Long)
-
+Private Sub WriteUserRows(ByVal ws As Worksheet, ByVal users As Object, ByVal includeExams As Boolean)
+    Dim keys As Variant
     Dim i As Long
-    Dim c As Long
+    Dim rowNo As Long
+    Dim rec As Object
+    Dim userKey As Variant
 
-    ws.Cells(HEADER_ROW, 1).Value = "No."
-    ws.Cells(HEADER_ROW, 2).Value = "Username"
-    ws.Cells(HEADER_ROW, 3).Value = "Email"
-    ws.Cells(HEADER_ROW, 4).Value = "Full Name"
-    ws.Cells(HEADER_ROW, 5).Value = "Enrollment Date"
-    ws.Cells(HEADER_ROW, 6).Value = "Enrollment End Date"
+    If users.Count = 0 Then Exit Sub
 
-    c = 7
+    keys = SortedDictionaryKeys(users)
+    rowNo = 4
 
-    For i = 1 To examCount
+    For i = LBound(keys) To UBound(keys)
+        userKey = keys(i)
+        Set rec = users(userKey)
 
-        ws.Cells(HEADER_ROW, c).Value = "Course title" & i
-        ws.Cells(HEADER_ROW, c + 1).Value = _
-            "Course Enrollment Status" & i
-        ws.Cells(HEADER_ROW, c + 2).Value = "Final Score" & i
+        ws.Cells(rowNo, 1).Value = rec("Username")
+        ws.Cells(rowNo, 2).Value = rec("Email")
+        ws.Cells(rowNo, 3).Value = rec("Full Name")
+        ws.Cells(rowNo, 4).Value = rec("Source Date")
 
-        c = c + 3
+        If includeExams Then WriteExamCells ws, rowNo, rec
 
+        rowNo = rowNo + 1
     Next i
+End Sub
 
+Private Sub WriteExamCells(ByVal ws As Worksheet, ByVal rowNo As Long, ByVal rec As Object)
+    Dim order As Collection
+    Dim exams As Object
+    Dim i As Long
+    Dim baseCol As Long
+    Dim title As String
+    Dim exam As Object
+
+    Set order = rec("ExamOrder")
+    Set exams = rec("Exams")
+
+    For i = 1 To order.Count
+        title = CStr(order(i))
+        Set exam = exams(title)
+        baseCol = 5 + ((i - 1) * 3)
+        ws.Cells(rowNo, baseCol).Value = exam("Course title")
+        ws.Cells(rowNo, baseCol + 1).Value = exam("Course Enrollment Status")
+        ws.Cells(rowNo, baseCol + 2).Value = exam("Final Score")
+    Next i
 End Sub
 
 Private Sub ClearOutputArea(ByVal ws As Worksheet)
-
-    Dim lastRow As Long
-    Dim lastCol As Long
-
-    lastRow = LastUsedRow(ws)
-    lastCol = LastUsedColumn(ws)
-
-    If lastRow < HEADER_ROW Then lastRow = HEADER_ROW
-    If lastCol < 1 Then lastCol = 1
-
-    ws.Range( _
-        ws.Cells(HEADER_ROW, 1), _
-        ws.Cells(lastRow, lastCol)).Clear
-
+    ws.Cells.Clear
 End Sub
 
-Private Function GetOrCreateSheet( _
-    ByVal sheetName As String) As Worksheet
+Private Sub WriteBaseHeaders(ByVal ws As Worksheet)
+    ws.Cells(3, 1).Value = HEADER_USERNAME
+    ws.Cells(3, 2).Value = HEADER_EMAIL
+    ws.Cells(3, 3).Value = HEADER_FULL_NAME
+    ws.Cells(3, 4).Value = "Source Date"
+End Sub
 
-    Dim ws As Worksheet
+Private Sub WritePassedGroupHeaders(ByVal ws As Worksheet, ByVal groupCount As Long)
+    Dim i As Long
+    Dim baseCol As Long
 
-    On Error Resume Next
-    Set ws = ThisWorkbook.Worksheets(sheetName)
-    On Error GoTo 0
+    For i = 1 To groupCount
+        baseCol = 5 + ((i - 1) * 3)
+        ws.Cells(3, baseCol).Value = HEADER_COURSE_TITLE & CStr(i)
+        ws.Cells(3, baseCol + 1).Value = HEADER_STATUS & CStr(i)
+        ws.Cells(3, baseCol + 2).Value = HEADER_FINAL_SCORE & CStr(i)
+    Next i
+End Sub
 
-    If ws Is Nothing Then
-
-        Set ws = ThisWorkbook.Worksheets.Add( _
-                    After:=ThisWorkbook.Worksheets( _
-                    ThisWorkbook.Worksheets.Count))
-
-        ws.Name = sheetName
-
-    End If
-
-    Set GetOrCreateSheet = ws
-
-End Function
-
-Private Sub CreateRunButton(ByVal ws As Worksheet)
-
+Private Sub AddRunButton(ByVal ws As Worksheet)
+    Dim shp As Shape
     Dim btn As Button
-    Dim leftPos As Double
-    Dim topPos As Double
-    Dim btnWidth As Double
-    Dim btnHeight As Double
 
-    On Error Resume Next
-    ws.Buttons("btnRunAMSAggregation").Delete
-    On Error GoTo 0
+    For Each shp In ws.Shapes
+        If shp.Name = "btnRunAMSAggregation" Then shp.Delete
+    Next shp
 
-    leftPos = ws.Range("A1").Left
-    topPos = ws.Range("A1").Top
-    btnWidth = ws.Range("A1:C1").Width
-    btnHeight = ws.Rows(1).Height + 5
-
-    Set btn = ws.Buttons.Add( _
-                leftPos, _
-                topPos, _
-                btnWidth, _
-                btnHeight)
-
-    With btn
-        .Name = "btnRunAMSAggregation"
-        .Caption = "Run AMS Aggregation"
-
-        .OnAction = _
-            "'" & ThisWorkbook.Name & _
-            "'!RunAMSAggregation"
-
-        .Font.Size = 11
-        .Font.Bold = True
-    End With
-
-    ws.Rows(1).RowHeight = 25
-
+    Set btn = ws.Buttons.Add(ws.Cells(1, 1).Left, ws.Cells(1, 1).Top, 170, 28)
+    btn.Name = "btnRunAMSAggregation"
+    btn.Caption = "Run AMS Aggregation"
+    btn.OnAction = "RunAMSAggregation"
 End Sub
 
-Private Sub FormatSheet(ByVal ws As Worksheet)
+Private Function EnsureSheet(ByVal sheetName As String) As Worksheet
+    On Error Resume Next
+    Set EnsureSheet = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
 
-    Dim lastCol As Long
-    Dim lastRow As Long
-    Dim c As Long
+    If EnsureSheet Is Nothing Then
+        Set EnsureSheet = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        EnsureSheet.Name = sheetName
+    End If
+End Function
 
-    lastCol = LastUsedColumn(ws)
-    lastRow = LastUsedRow(ws)
+Private Function GetOrCreateUser(ByVal users As Object, ByVal userKey As String) As Object
+    Dim rec As Object
 
-    If lastCol < 1 Then Exit Sub
-
-    With ws.Range( _
-        ws.Cells(HEADER_ROW, 1), _
-        ws.Cells(HEADER_ROW, lastCol))
-
-        .Font.Bold = True
-        .HorizontalAlignment = xlCenter
-        .VerticalAlignment = xlCenter
-    End With
-
-    If ws.AutoFilterMode Then
-        ws.AutoFilterMode = False
+    If users.Exists(userKey) Then
+        Set GetOrCreateUser = users(userKey)
+        Exit Function
     End If
 
-    If lastRow >= HEADER_ROW Then
-        ws.Range( _
-            ws.Cells(HEADER_ROW, 1), _
-            ws.Cells(lastRow, lastCol)).AutoFilter
+    Set rec = CreateTextDictionary()
+    rec("Username") = vbNullString
+    rec("Email") = vbNullString
+    rec("Full Name") = vbNullString
+    rec("Source Date") = vbNullString
+    Set rec("Exams") = CreateTextDictionary()
+    Set rec("ExamOrder") = New Collection
+
+    users.Add userKey, rec
+    Set GetOrCreateUser = rec
+End Function
+
+Private Sub UpdateBasicInfo(ByVal rec As Object, ByVal fields As Variant, ByVal headerMap As Object, ByVal sourceDate As String)
+    If CStr(rec("Source Date")) <= sourceDate Then
+        rec("Username") = GetField(fields, headerMap, HEADER_USERNAME)
+        rec("Email") = GetField(fields, headerMap, HEADER_EMAIL)
+        rec("Full Name") = GetField(fields, headerMap, HEADER_FULL_NAME)
+        rec("Source Date") = sourceDate
     End If
+End Sub
 
-    ws.Columns.AutoFit
+Private Sub UpdateExam(ByVal rec As Object, ByVal title As String, ByVal statusText As String, ByVal finalScore As String, ByVal sourceDate As String)
+    Dim exams As Object
+    Dim exam As Object
+    Dim order As Collection
 
-    For c = 1 To lastCol
-        If ws.Columns(c).ColumnWidth > 45 Then
-            ws.Columns(c).ColumnWidth = 45
+    Set exams = rec("Exams")
+    Set order = rec("ExamOrder")
+
+    If exams.Exists(title) Then
+        Set exam = exams(title)
+        If CStr(exam("Source Date")) <= sourceDate Then
+            exam("Course title") = title
+            exam("Course Enrollment Status") = statusText
+            exam("Final Score") = finalScore
+            exam("Source Date") = sourceDate
         End If
-    Next c
-
+    Else
+        Set exam = CreateTextDictionary()
+        exam("Course title") = title
+        exam("Course Enrollment Status") = statusText
+        exam("Final Score") = finalScore
+        exam("Source Date") = sourceDate
+        exams.Add title, exam
+        order.Add title
+    End If
 End Sub
 
-Private Function LastUsedRow( _
-    ByVal ws As Worksheet) As Long
-
-    Dim foundCell As Range
-
-    On Error Resume Next
-
-    Set foundCell = ws.Cells.Find( _
-                        What:="*", _
-                        After:=ws.Cells(1, 1), _
-                        LookAt:=xlPart, _
-                        LookIn:=xlFormulas, _
-                        SearchOrder:=xlByRows, _
-                        SearchDirection:=xlPrevious)
-
-    On Error GoTo 0
-
-    If foundCell Is Nothing Then
-        LastUsedRow = 1
-    Else
-        LastUsedRow = foundCell.Row
-    End If
-
+Private Function BuildTargetTitleDictionary() As Object
+    Set BuildTargetTitleDictionary = CreateBinaryDictionary()
+    BuildTargetTitleDictionary.Add "Custom Compiler: Basic Layout Design Exam", True
+    BuildTargetTitleDictionary.Add "Custom Compiler: Introduction to Platform Exam", True
+    BuildTargetTitleDictionary.Add "Custom Compiler: Schematic Entry Exam", True
+    BuildTargetTitleDictionary.Add "PrimeWave Design Environment Exam", True
 End Function
 
-Private Function LastUsedColumn( _
-    ByVal ws As Worksheet) As Long
+Private Function BuildUserKey(ByVal username As String, ByVal email As String, ByVal fullName As String) As String
+    username = Trim$(username)
+    email = Trim$(email)
+    fullName = Trim$(fullName)
 
-    Dim foundCell As Range
-
-    On Error Resume Next
-
-    Set foundCell = ws.Cells.Find( _
-                        What:="*", _
-                        After:=ws.Cells(1, 1), _
-                        LookAt:=xlPart, _
-                        LookIn:=xlFormulas, _
-                        SearchOrder:=xlByColumns, _
-                        SearchDirection:=xlPrevious)
-
-    On Error GoTo 0
-
-    If foundCell Is Nothing Then
-        LastUsedColumn = 1
+    If Len(username) > 0 Or Len(email) > 0 Then
+        BuildUserKey = LCase$(username) & "|" & LCase$(email)
     Else
-        LastUsedColumn = foundCell.Column
+        BuildUserKey = LCase$(fullName)
     End If
-
 End Function
 
-Private Function CleanText( _
-    ByVal value As Variant) As String
+Private Function GetMaxExamCount(ByVal users As Object) As Long
+    Dim key As Variant
+    Dim rec As Object
+    Dim countValue As Long
 
-    If IsError(value) Then
-        CleanText = ""
-    ElseIf IsNull(value) Or IsEmpty(value) Then
-        CleanText = ""
-    Else
-        CleanText = Trim$(CStr(value))
-    End If
-
+    GetMaxExamCount = 0
+    For Each key In users.Keys
+        Set rec = users(key)
+        countValue = rec("ExamOrder").Count
+        If countValue > GetMaxExamCount Then GetMaxExamCount = countValue
+    Next key
 End Function
 
+Private Function GetSortedDateFolders(ByVal csvRoot As Object) As Collection
+    Dim rawFolders As Collection
+    Dim sortedFolders As Collection
+    Dim arr() As Object
+    Dim subFolder As Object
+    Dim i As Long
+    Dim j As Long
+    Dim temp As Object
+
+    Set rawFolders = New Collection
+
+    For Each subFolder In csvRoot.SubFolders
+        If IsDateFolderName(subFolder.Name) Then rawFolders.Add subFolder
+    Next subFolder
+
+    Set sortedFolders = New Collection
+    If rawFolders.Count = 0 Then
+        Set GetSortedDateFolders = sortedFolders
+        Exit Function
+    End If
+
+    ReDim arr(1 To rawFolders.Count)
+    For i = 1 To rawFolders.Count
+        Set arr(i) = rawFolders(i)
+    Next i
+
+    For i = LBound(arr) To UBound(arr) - 1
+        For j = i + 1 To UBound(arr)
+            If CStr(arr(i).Name) > CStr(arr(j).Name) Then
+                Set temp = arr(i)
+                Set arr(i) = arr(j)
+                Set arr(j) = temp
+            End If
+        Next j
+    Next i
+
+    For i = LBound(arr) To UBound(arr)
+        sortedFolders.Add arr(i)
+    Next i
+
+    Set GetSortedDateFolders = sortedFolders
+End Function
+
+Private Function IsDateFolderName(ByVal folderName As String) As Boolean
+    Dim i As Long
+    If Len(folderName) <> 8 Then Exit Function
+    For i = 1 To 8
+        If Mid$(folderName, i, 1) < "0" Or Mid$(folderName, i, 1) > "9" Then Exit Function
+    Next i
+    IsDateFolderName = True
+End Function
+
+Private Function SortedDictionaryKeys(ByVal dict As Object) As Variant
+    Dim keys As Variant
+    Dim i As Long
+    Dim j As Long
+    Dim temp As Variant
+
+    keys = dict.Keys
+    If dict.Count <= 1 Then
+        SortedDictionaryKeys = keys
+        Exit Function
+    End If
+
+    For i = LBound(keys) To UBound(keys) - 1
+        For j = i + 1 To UBound(keys)
+            If CStr(keys(i)) > CStr(keys(j)) Then
+                temp = keys(i)
+                keys(i) = keys(j)
+                keys(j) = temp
+            End If
+        Next j
+    Next i
+
+    SortedDictionaryKeys = keys
+End Function
+
+Private Function BuildHeaderMap(ByVal headers As Variant) As Object
+    Dim map As Object
+    Dim i As Long
+    Dim headerText As String
+
+    Set map = CreateTextDictionary()
+
+    For i = LBound(headers) To UBound(headers)
+        headerText = NormalizeHeaderText(CStr(headers(i)))
+        If Len(headerText) > 0 Then
+            If Not map.Exists(headerText) Then map.Add headerText, i
+        End If
+    Next i
+
+    Set BuildHeaderMap = map
+End Function
+
+Private Function CleanInputLine(ByVal lineText As String) As String
+    CleanInputLine = Replace(lineText, Chr$(0), vbNullString)
+End Function
+
+Private Function NormalizeHeaderText(ByVal headerText As String) As String
+    headerText = Trim$(headerText)
+    headerText = Replace(headerText, Chr$(0), vbNullString)
+    headerText = Replace(headerText, Chr$(255) & Chr$(254), vbNullString)
+    headerText = Replace(headerText, Chr$(254) & Chr$(255), vbNullString)
+
+    If Len(headerText) > 0 Then
+        If AscW(Left$(headerText, 1)) = -257 Then headerText = Mid$(headerText, 2)
+    End If
+
+    If Len(headerText) >= 2 Then
+        If Left$(headerText, 1) = """" And Right$(headerText, 1) = """" Then
+            headerText = Mid$(headerText, 2, Len(headerText) - 2)
+        End If
+    End If
+
+    NormalizeHeaderText = Trim$(headerText)
+End Function
+
+Private Function RequiredHeaderCount() As Long
+    RequiredHeaderCount = 6
+End Function
+
+Private Function CountRequiredHeaders(ByVal headerMap As Object) As Long
+    If headerMap Is Nothing Then Exit Function
+    If headerMap.Exists(HEADER_USERNAME) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_EMAIL) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_FULL_NAME) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_COURSE_TITLE) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_STATUS) Then CountRequiredHeaders = CountRequiredHeaders + 1
+    If headerMap.Exists(HEADER_FINAL_SCORE) Then CountRequiredHeaders = CountRequiredHeaders + 1
+End Function
+
+Private Sub ValidateHeaders(ByVal headerMap As Object, ByVal filePath As String, ByVal headers As Variant, ByVal delimiter As String, ByVal rowNo As Long)
+    Dim missing As String
+    Dim detail As String
+
+    AddMissingHeader missing, headerMap, HEADER_USERNAME
+    AddMissingHeader missing, headerMap, HEADER_EMAIL
+    AddMissingHeader missing, headerMap, HEADER_FULL_NAME
+    AddMissingHeader missing, headerMap, HEADER_COURSE_TITLE
+    AddMissingHeader missing, headerMap, HEADER_STATUS
+    AddMissingHeader missing, headerMap, HEADER_FINAL_SCORE
+
+    If Len(missing) > 0 Then
+        detail = "Required CSV header(s) missing in " & filePath & ": " & Mid$(missing, 3) & vbCrLf & _
+                 "Best header candidate row: " & CStr(rowNo) & vbCrLf & _
+                 "Detected delimiter: " & DelimiterName(delimiter) & vbCrLf & _
+                 "Detected header fields: " & HeaderArrayPreview(headers)
+        Err.Raise vbObjectError + 102, , detail
+    End If
+End Sub
+
+Private Function DelimiterName(ByVal delimiter As String) As String
+    If delimiter = vbTab Then
+        DelimiterName = "tab"
+    ElseIf delimiter = "," Then
+        DelimiterName = "comma"
+    ElseIf delimiter = ";" Then
+        DelimiterName = "semicolon"
+    ElseIf delimiter = "|" Then
+        DelimiterName = "pipe"
+    Else
+        DelimiterName = "unknown"
+    End If
+End Function
+
+Private Function HeaderArrayPreview(ByVal headers As Variant) As String
+    Dim i As Long
+    Dim itemText As String
+
+    On Error GoTo NoHeaders
+
+    For i = LBound(headers) To UBound(headers)
+        itemText = NormalizeHeaderText(CStr(headers(i)))
+        If Len(itemText) > 80 Then itemText = Left$(itemText, 80) & "..."
+        HeaderArrayPreview = HeaderArrayPreview & " [" & CStr(i + 1) & "] " & itemText
+    Next i
+
+    If Len(HeaderArrayPreview) = 0 Then HeaderArrayPreview = "(blank)"
+    Exit Function
+
+NoHeaders:
+    HeaderArrayPreview = "(none)"
+End Function
+
+Private Sub AddMissingHeader(ByRef missing As String, ByVal headerMap As Object, ByVal headerName As String)
+    If headerMap Is Nothing Then
+        missing = missing & ", " & headerName
+    ElseIf Not headerMap.Exists(headerName) Then
+        missing = missing & ", " & headerName
+    End If
+End Sub
+
+Private Function GetField(ByVal fields As Variant, ByVal headerMap As Object, ByVal headerName As String) As String
+    Dim idx As Long
+
+    If headerMap Is Nothing Then Exit Function
+    If Not headerMap.Exists(headerName) Then Exit Function
+
+    idx = CLng(headerMap(headerName))
+    If idx < LBound(fields) Or idx > UBound(fields) Then Exit Function
+
+    GetField = Trim$(CStr(fields(idx)))
+End Function
+
+Private Function ParseCsvLine(ByVal lineText As String) As Variant
+    ParseCsvLine = ParseDelimitedLine(lineText, DetectDelimiter(lineText))
+End Function
+
+Private Function ParseDelimitedLine(ByVal lineText As String, ByVal delimiter As String) As Variant
+    Dim values As Collection
+    Dim currentValue As String
+    Dim i As Long
+    Dim ch As String
+    Dim inQuotes As Boolean
+
+    Set values = New Collection
+    currentValue = vbNullString
+    inQuotes = False
+
+    For i = 1 To Len(lineText)
+        ch = Mid$(lineText, i, 1)
+
+        If ch = """" Then
+            If inQuotes And i < Len(lineText) And Mid$(lineText, i + 1, 1) = """" Then
+                currentValue = currentValue & """"
+                i = i + 1
+            Else
+                inQuotes = Not inQuotes
+            End If
+        ElseIf ch = delimiter And Not inQuotes Then
+            values.Add currentValue
+            currentValue = vbNullString
+        Else
+            currentValue = currentValue & ch
+        End If
+    Next i
+
+    values.Add currentValue
+    ParseDelimitedLine = CollectionToArray(values)
+End Function
+
+Private Function DetectDelimiter(ByVal lineText As String) As String
+    Dim commaCount As Long
+    Dim tabCount As Long
+    Dim semicolonCount As Long
+    Dim pipeCount As Long
+
+    commaCount = CountDelimiterOutsideQuotes(lineText, ",")
+    tabCount = CountDelimiterOutsideQuotes(lineText, vbTab)
+    semicolonCount = CountDelimiterOutsideQuotes(lineText, ";")
+    pipeCount = CountDelimiterOutsideQuotes(lineText, "|")
+
+    If tabCount > commaCount And tabCount >= semicolonCount And tabCount >= pipeCount Then
+        DetectDelimiter = vbTab
+    ElseIf semicolonCount > commaCount And semicolonCount > tabCount And semicolonCount >= pipeCount Then
+        DetectDelimiter = ";"
+    ElseIf pipeCount > commaCount And pipeCount > tabCount And pipeCount > semicolonCount Then
+        DetectDelimiter = "|"
+    Else
+        DetectDelimiter = ","
+    End If
+End Function
+
+Private Function CountDelimiterOutsideQuotes(ByVal lineText As String, ByVal delimiter As String) As Long
+    Dim i As Long
+    Dim ch As String
+    Dim inQuotes As Boolean
+
+    For i = 1 To Len(lineText)
+        ch = Mid$(lineText, i, 1)
+
+        If ch = """" Then
+            If inQuotes And i < Len(lineText) And Mid$(lineText, i + 1, 1) = """" Then
+                i = i + 1
+            Else
+                inQuotes = Not inQuotes
+            End If
+        ElseIf ch = delimiter And Not inQuotes Then
+            CountDelimiterOutsideQuotes = CountDelimiterOutsideQuotes + 1
+        End If
+    Next i
+End Function
+
+Private Function CollectionToArray(ByVal values As Collection) As Variant
+    Dim arr() As String
+    Dim i As Long
+
+    ReDim arr(0 To values.Count - 1)
+    For i = 1 To values.Count
+        arr(i - 1) = CStr(values(i))
+    Next i
+
+    CollectionToArray = arr
+End Function
+
+Private Function CreateTextDictionary() As Object
+    Set CreateTextDictionary = CreateObject("Scripting.Dictionary")
+    CreateTextDictionary.CompareMode = vbTextCompare
+End Function
+
+Private Function CreateBinaryDictionary() As Object
+    Set CreateBinaryDictionary = CreateObject("Scripting.Dictionary")
+    CreateBinaryDictionary.CompareMode = vbBinaryCompare
+End Function
+
+Private Function ResolveLocalWorkbookFolder(ByVal fso As Object) As String
+    Dim workbookPath As String
+
+    workbookPath = ThisWorkbook.Path
+    If Len(workbookPath) = 0 Then
+        Err.Raise vbObjectError + 103, , "Please save this workbook before running aggregation."
+    End If
+
+    If IsHttpPath(workbookPath) Then
+        ResolveLocalWorkbookFolder = ResolveSharePointFolderToLocal(fso, workbookPath)
+    Else
+        ResolveLocalWorkbookFolder = workbookPath
+    End If
+
+    If Len(ResolveLocalWorkbookFolder) = 0 Or Not fso.FolderExists(ResolveLocalWorkbookFolder) Then
+        Err.Raise vbObjectError + 104, , "Could not resolve workbook folder to a local synced folder: " & workbookPath
+    End If
+End Function
+
+Private Function IsHttpPath(ByVal pathText As String) As Boolean
+    IsHttpPath = (LCase$(Left$(pathText, 7)) = "http://" Or LCase$(Left$(pathText, 8)) = "https://")
+End Function
+
+Private Function ResolveSharePointFolderToLocal(ByVal fso As Object, ByVal urlPath As String) As String
+    Dim suffix As String
+    Dim roots As Collection
+    Dim rootPath As Variant
+    Dim candidate As String
+
+    suffix = ExtractSharePointDocumentsSuffix(urlPath)
+    If Len(suffix) = 0 Then Exit Function
+
+    Set roots = GetOneDriveRootCandidates(fso)
+    For Each rootPath In roots
+        candidate = fso.BuildPath(CStr(rootPath), suffix)
+        If fso.FolderExists(candidate) Then
+            ResolveSharePointFolderToLocal = candidate
+            Exit Function
+        End If
+    Next rootPath
+End Function
+
+Private Function ExtractSharePointDocumentsSuffix(ByVal urlPath As String) As String
+    Dim decoded As String
+    Dim lowerDecoded As String
+    Dim pos As Long
+    Dim marker As Variant
+    Dim markers As Variant
+    Dim queryPos As Long
+
+    decoded = UrlDecodeAscii(urlPath)
+    queryPos = InStr(1, decoded, "?", vbTextCompare)
+    If queryPos > 0 Then decoded = Left$(decoded, queryPos - 1)
+
+    lowerDecoded = LCase$(decoded)
+    markers = Array("/documents/", "/shared documents/")
+
+    For Each marker In markers
+        pos = InStr(1, lowerDecoded, CStr(marker), vbTextCompare)
+        If pos > 0 Then
+            ExtractSharePointDocumentsSuffix = Mid$(decoded, pos + Len(CStr(marker)))
+            ExtractSharePointDocumentsSuffix = Replace(ExtractSharePointDocumentsSuffix, "/", "\")
+            Exit Function
+        End If
+    Next marker
+End Function
+
+Private Function GetOneDriveRootCandidates(ByVal fso As Object) As Collection
+    Dim roots As Collection
+    Dim shellObj As Object
+    Dim env As Object
+    Dim varName As Variant
+    Dim rootPath As String
+    Dim userProfile As String
+    Dim userFolder As Object
+    Dim subFolder As Object
+
+    Set roots = New Collection
+    Set shellObj = CreateObject("WScript.Shell")
+    Set env = shellObj.Environment("PROCESS")
+
+    For Each varName In Array("OneDriveCommercial", "OneDriveConsumer", "OneDrive")
+        rootPath = CStr(env(CStr(varName)))
+        AddRootCandidate roots, fso, rootPath
+    Next varName
+
+    userProfile = CStr(env("USERPROFILE"))
+    If Len(userProfile) > 0 And fso.FolderExists(userProfile) Then
+        Set userFolder = fso.GetFolder(userProfile)
+        For Each subFolder In userFolder.SubFolders
+            If LCase$(Left$(subFolder.Name, 8)) = "onedrive" Then
+                AddRootCandidate roots, fso, subFolder.Path
+            End If
+        Next subFolder
+    End If
+
+    Set GetOneDriveRootCandidates = roots
+End Function
+
+Private Sub AddRootCandidate(ByVal roots As Collection, ByVal fso As Object, ByVal rootPath As String)
+    Dim existing As Variant
+
+    rootPath = Trim$(rootPath)
+    If Len(rootPath) = 0 Then Exit Sub
+    If Not fso.FolderExists(rootPath) Then Exit Sub
+
+    For Each existing In roots
+        If StrComp(CStr(existing), rootPath, vbTextCompare) = 0 Then Exit Sub
+    Next existing
+
+    roots.Add rootPath
+End Sub
+
+Private Function UrlDecodeAscii(ByVal encodedText As String) As String
+    Dim i As Long
+    Dim ch As String
+    Dim hexValue As String
+    Dim result As String
+    Dim bytes() As Byte
+    Dim byteCount As Long
+
+    i = 1
+    Do While i <= Len(encodedText)
+        ch = Mid$(encodedText, i, 1)
+        If ch = "%" And i + 2 <= Len(encodedText) Then
+            byteCount = 0
+            Erase bytes
+
+            Do While i <= Len(encodedText) - 2 And Mid$(encodedText, i, 1) = "%"
+                hexValue = Mid$(encodedText, i + 1, 2)
+                If Not IsHexPair(hexValue) Then Exit Do
+
+                byteCount = byteCount + 1
+                ReDim Preserve bytes(1 To byteCount)
+                bytes(byteCount) = CByte(CLng("&H" & hexValue))
+                i = i + 3
+            Loop
+
+            If byteCount > 0 Then
+                result = result & Utf8BytesToString(bytes, byteCount)
+            Else
+                result = result & ch
+                i = i + 1
+            End If
+        Else
+            result = result & ch
+            i = i + 1
+        End If
+    Loop
+
+    UrlDecodeAscii = result
+End Function
+
+Private Function Utf8BytesToString(ByRef bytes() As Byte, ByVal byteCount As Long) As String
+    Dim i As Long
+    Dim b1 As Long
+    Dim b2 As Long
+    Dim b3 As Long
+    Dim b4 As Long
+    Dim codePoint As Long
+
+    i = 1
+    Do While i <= byteCount
+        b1 = CLng(bytes(i))
+
+        If b1 < 128 Then
+            Utf8BytesToString = Utf8BytesToString & ChrWValue(b1)
+            i = i + 1
+        ElseIf b1 >= 192 And b1 < 224 And i + 1 <= byteCount Then
+            b2 = CLng(bytes(i + 1))
+            codePoint = ((b1 And 31) * 64) + (b2 And 63)
+            Utf8BytesToString = Utf8BytesToString & ChrWValue(codePoint)
+            i = i + 2
+        ElseIf b1 >= 224 And b1 < 240 And i + 2 <= byteCount Then
+            b2 = CLng(bytes(i + 1))
+            b3 = CLng(bytes(i + 2))
+            codePoint = ((b1 And 15) * 4096) + ((b2 And 63) * 64) + (b3 And 63)
+            Utf8BytesToString = Utf8BytesToString & ChrWValue(codePoint)
+            i = i + 3
+        ElseIf b1 >= 240 And b1 < 248 And i + 3 <= byteCount Then
+            b2 = CLng(bytes(i + 1))
+            b3 = CLng(bytes(i + 2))
+            b4 = CLng(bytes(i + 3))
+            codePoint = ((b1 And 7) * 262144) + ((b2 And 63) * 4096) + ((b3 And 63) * 64) + (b4 And 63)
+            Utf8BytesToString = Utf8BytesToString & CodePointToString(codePoint)
+            i = i + 4
+        Else
+            Utf8BytesToString = Utf8BytesToString & "?"
+            i = i + 1
+        End If
+    Loop
+End Function
+
+Private Function CodePointToString(ByVal codePoint As Long) As String
+    Dim value As Long
+    Dim highSurrogate As Long
+    Dim lowSurrogate As Long
+
+    If codePoint <= 65535 Then
+        CodePointToString = ChrWValue(codePoint)
+    Else
+        value = codePoint - 65536
+        highSurrogate = 55296 + (value \ 1024)
+        lowSurrogate = 56320 + (value Mod 1024)
+        CodePointToString = ChrWValue(highSurrogate) & ChrWValue(lowSurrogate)
+    End If
+End Function
+
+Private Function ChrWValue(ByVal codePoint As Long) As String
+    If codePoint > 32767 Then codePoint = codePoint - 65536
+    ChrWValue = ChrW$(codePoint)
+End Function
+
+Private Function IsHexPair(ByVal valueText As String) As Boolean
+    Dim i As Long
+    Dim ch As String
+
+    If Len(valueText) <> 2 Then Exit Function
+    For i = 1 To 2
+        ch = UCase$(Mid$(valueText, i, 1))
+        If Not ((ch >= "0" And ch <= "9") Or (ch >= "A" And ch <= "F")) Then Exit Function
+    Next i
+
+    IsHexPair = True
+End Function
